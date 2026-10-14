@@ -1,1186 +1,383 @@
 "use client";
 
-import {
-  Box,
-  Check,
-  CircleDot,
-  CircleAlert,
-  Crosshair,
-  Download,
-  Drill,
-  Expand,
-  FileDown,
-  Files,
-  FileType2,
-  FolderOpen,
-  Grid3X3,
-  Info,
-  Layers3,
-  Link2,
-  Maximize2,
-  MousePointer2,
-  Pencil,
-  Play,
-  Plus,
-  RotateCcw,
-  RotateCw,
-  Rotate3d,
-  Ruler,
-  Save,
-  Scissors,
-  Settings2,
-  Shrink,
-  Trash2,
-  TrendingDown,
-  UnfoldHorizontal,
-  Undo2,
-  Upload,
-  X,
-  ZoomIn,
-  ZoomOut,
-} from "lucide-react";
+import NextImage from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ToolpathEditor2D } from "./ToolpathEditor2D";
-import { ToolpathPreview, type PreviewHandle } from "./ToolpathPreview";
-import {
-  buildPassDepths,
-  closeOpenPaths,
-  estimateMinutes,
-  generateGcode,
-  getBounds,
-  getMaterialBounds,
-  parseDxfText,
-  pathsForMaterial,
-  type CamSettings,
-  type CornerReliefType,
-  type MaterialOrigin,
-  type ParsedDrawing,
-  type ToolPath,
-} from "@/lib/cam";
+import { AlertTriangle, Check, ChevronLeft, ChevronRight, Crosshair, Download, Focus, ImagePlus, Ruler, Settings2, ShieldCheck, SlidersHorizontal, Upload, X } from "lucide-react";
+import { buildMortises, closedPathLength, generateSeatDxf, generateSeatGcode, mortiseLayoutOutlines, mortisePocketPath, offsetPolygon, perspectiveCorrect, pointInPolygon, pointOnClosedPath, polygonSelfIntersects, type MortiseLayout, type SeatPoint } from "@/lib/seatCam";
+import { extractSeatOutlineWithOpenCV } from "@/lib/opencvContours";
 
-type SectionName = "file" | "cut" | "bit" | "material" | "settings";
-type CornerEditMode = "select" | CornerReliefType;
-type NumericCamSetting = "finalDepth" | "stepDown" | "bitDiameter" | "feedRate" | "plungeRate" | "retractHeight" | "rapidFeed" | "rampLength" | "spindleRpm" | "fluteCount";
-type ExportMode = "combined" | "separate";
-type BitType = "straight" | "v" | "ball-nose" | "crown" | "drill" | "custom";
-
-type BitDefinition = {
-  id: string;
-  name: string;
-  type: BitType;
-  cuttingDiameter: number;
-  shankDiameter: number;
-  fluteLength: number;
-  overallLength: number;
-  fluteCount: number;
-  spindleRpm: number;
-  feedRate: number;
-  plungeRate: number;
-  vAngle: number;
-  tipDiameter: number;
-  notes: string;
+type Step = 1 | 2 | 3;
+type TransformDrag =
+  | { mode: "move"; pointerId: number; start: SeatPoint; offsetX: number; offsetY: number }
+  | { mode: "scale"; pointerId: number; opposite: SeatPoint; diagonal: SeatPoint; center: SeatPoint; scale: number; offsetX: number; offsetY: number };
+type BoxCorner = "nw" | "ne" | "se" | "sw";
+type TabDrag = { pointerId: number; index: number; startPosition: number; moved: boolean };
+type ExportGeometryMode = "seat-with-mortises" | "outline-only" | "mortises-only";
+type StaffSettings = {
+  threshold: number; gapClosing: number; imageOpacity: number;
+  boardWidth: number; boardHeight: number; boardThickness: number;
+  exportGeometryMode: ExportGeometryMode; mortiseLayout: MortiseLayout; mortiseWidth: number; mortiseHeight: number; mortiseGapX: number; mortiseGapY: number; mortiseDepth: number;
+  bitDiameter: number; stepDown: number; feedRate: number; plungeRate: number; safeZ: number; spindleRpm: number; tabWidth: number; tabHeight: number;
+  showToolpath: boolean;
 };
 
-type CalculatedToolpath = {
-  id: string;
-  name: string;
-  pathIds: string[];
-  paths: ToolPath[];
-  settings: CamSettings;
-  gcode: string;
-  estimatedMinutes: number;
-  passCount: number;
+const defaultCorners: SeatPoint[] = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+const stepLabels = ["写真をよみこむ", "ざめんの形を決める", "マシンにおくる"];
+const staffSettingsKey = "chair-workshop:staff-settings:v1";
+const defaultStaffSettings: StaffSettings = {
+  threshold: 142, gapClosing: 50, imageOpacity: 24,
+  boardWidth: 400, boardHeight: 400, boardThickness: 24,
+  exportGeometryMode: "seat-with-mortises", mortiseLayout: "four", mortiseWidth: 24, mortiseHeight: 48, mortiseGapX: 102, mortiseGapY: 102, mortiseDepth: 12,
+  bitDiameter: 6, stepDown: 3.2, feedRate: 1000, plungeRate: 300, safeZ: 2, spindleRpm: 18000, tabWidth: 12, tabHeight: 3,
+  showToolpath: false,
 };
 
-type SavedProject = {
-  version: 1;
-  savedAt: number;
-  fileName: string;
-  drawing: ParsedDrawing | null;
-  displayPaths: ToolPath[];
-  calculatedToolpaths: CalculatedToolpath[];
-  settings: CamSettings;
-  origin: MaterialOrigin;
-  materialWidth: number;
-  materialHeight: number;
-  materialThickness: number;
-  exportMode: ExportMode;
-  toolpathName: string;
-  view: "2d" | "3d";
-  bitLibrary?: BitDefinition[];
-  activeBitId?: string;
-};
-
-type SaveStatus = "loading" | "saving" | "saved" | "error";
-
-const PROJECT_DB_NAME = "camee-projects";
-const PROJECT_STORE_NAME = "projects";
-const CURRENT_PROJECT_KEY = "current-project";
-
-const bitTypeLabels: Record<BitType, string> = {
-  straight: "ストレート",
-  v: "Vビット",
-  "ball-nose": "ボールノーズ",
-  crown: "クラウン",
-  drill: "ドリル",
-  custom: "カスタム",
-};
-
-const defaultCamSettings: CamSettings = {
-  finalDepth: 3,
-  stepDown: 1,
-  bitDiameter: 3,
-  toolName: "ストレート 3mm",
-  toolType: "straight",
-  spindleRpm: 18000,
-  fluteCount: 2,
-  feedRate: 1000,
-  plungeRate: 300,
-  retractHeight: 2,
-  rapidFeed: 2000,
-  rampEnabled: false,
-  rampLength: 12,
-};
-
-const defaultBitLibrary: BitDefinition[] = [
-  { id: "straight-3", name: "ストレート 3mm", type: "straight", cuttingDiameter: 3, shankDiameter: 3.175, fluteLength: 12, overallLength: 38, fluteCount: 2, spindleRpm: 18000, feedRate: 1000, plungeRate: 300, vAngle: 0, tipDiameter: 0, notes: "" },
-  { id: "v-60", name: "Vビット 60°", type: "v", cuttingDiameter: 12, shankDiameter: 3.175, fluteLength: 12, overallLength: 38, fluteCount: 2, spindleRpm: 18000, feedRate: 800, plungeRate: 250, vAngle: 60, tipDiameter: 0.2, notes: "" },
-  { id: "ball-3", name: "ボールノーズ 3mm", type: "ball-nose", cuttingDiameter: 3, shankDiameter: 3.175, fluteLength: 12, overallLength: 38, fluteCount: 2, spindleRpm: 18000, feedRate: 900, plungeRate: 250, vAngle: 0, tipDiameter: 0, notes: "" },
-  { id: "crown-6", name: "クラウン 6mm", type: "crown", cuttingDiameter: 6, shankDiameter: 6, fluteLength: 8, overallLength: 50, fluteCount: 2, spindleRpm: 16000, feedRate: 700, plungeRate: 200, vAngle: 0, tipDiameter: 0, notes: "" },
-];
-
-function settingsForBit(bit: BitDefinition): Pick<CamSettings, "bitDiameter" | "toolName" | "toolType" | "spindleRpm" | "fluteCount" | "feedRate" | "plungeRate"> {
+function normalizeStaffSettings(value: unknown): StaffSettings {
+  const source = value && typeof value === "object" ? value as Partial<StaffSettings> : {};
+  const number = (key: keyof StaffSettings, fallback: number, min: number, max = Number.POSITIVE_INFINITY) => {
+    const candidate = source[key];
+    return typeof candidate === "number" && Number.isFinite(candidate) ? Math.max(min, Math.min(max, candidate)) : fallback;
+  };
+  const boardWidth = number("boardWidth", 400, 100);
+  const boardHeight = number("boardHeight", 400, 100);
+  const boardThickness = number("boardThickness", 24, 3);
+  const bitDiameter = number("bitDiameter", 6, 1);
+  const mortiseWidth = number("mortiseWidth", 24, bitDiameter);
+  const mortiseHeight = number("mortiseHeight", 48, bitDiameter);
   return {
-    bitDiameter: bit.cuttingDiameter,
-    toolName: bit.name,
-    toolType: bit.type,
-    spindleRpm: bit.spindleRpm,
-    fluteCount: bit.fluteCount,
-    feedRate: bit.feedRate,
-    plungeRate: bit.plungeRate,
+    threshold: number("threshold", 142, 55, 225), gapClosing: number("gapClosing", 50, 0, 100), imageOpacity: number("imageOpacity", 24, 0, 80),
+    boardWidth, boardHeight, boardThickness,
+    exportGeometryMode: source.exportGeometryMode === "outline-only" ? "outline-only" : source.exportGeometryMode === "mortises-only" ? "mortises-only" : "seat-with-mortises",
+    mortiseLayout: source.mortiseLayout === "cross" ? "cross" : "four", mortiseWidth, mortiseHeight,
+    mortiseGapX: number("mortiseGapX", 102, 0, Math.max(0, boardWidth - mortiseHeight * 2)),
+    mortiseGapY: number("mortiseGapY", 102, 0, Math.max(0, boardHeight - mortiseHeight * 2)),
+    mortiseDepth: number("mortiseDepth", 12, .5, boardThickness),
+    bitDiameter, stepDown: number("stepDown", 3.2, .1, 3.2), feedRate: number("feedRate", 1000, 50),
+    plungeRate: number("plungeRate", 300, 20), safeZ: number("safeZ", 2, .1), spindleRpm: number("spindleRpm", 18000, 1000),
+    tabWidth: number("tabWidth", 12, 1), tabHeight: number("tabHeight", 3, .5, boardThickness),
+    showToolpath: typeof source.showToolpath === "boolean" ? source.showToolpath : false,
   };
 }
 
-const materialOrigins: Array<{ id: Exclude<MaterialOrigin, "dxf">; label: string }> = [
-  { id: "upper-left", label: "左上" },
-  { id: "upper-center", label: "上中央" },
-  { id: "upper-right", label: "右上" },
-  { id: "center-left", label: "左中央" },
-  { id: "center", label: "中央" },
-  { id: "center-right", label: "右中央" },
-  { id: "lower-left", label: "左下" },
-  { id: "lower-center", label: "下中央" },
-  { id: "lower-right", label: "右下" },
-];
-
-const originLabels: Record<MaterialOrigin, string> = {
-  "upper-left": "材料の左上",
-  "upper-center": "材料の上中央",
-  "upper-right": "材料の右上",
-  "center-left": "材料の左中央",
-  center: "材料の中央",
-  "center-right": "材料の右中央",
-  "lower-left": "材料の左下",
-  "lower-center": "材料の下中央",
-  "lower-right": "材料の右下",
-  dxf: "DXF原点",
-};
-
-const toolButtons = [
-  { id: "file" as const, label: "DXFファイル", icon: FolderOpen },
-  { id: "cut" as const, label: "彫り込み", icon: Scissors },
-  { id: "bit" as const, label: "ビット", icon: Drill },
-  { id: "material" as const, label: "材料", icon: Box },
-  { id: "settings" as const, label: "出力設定", icon: Settings2 },
-];
-
-function IconButton({
-  label,
-  children,
-  active = false,
-  disabled = false,
-  onClick,
-}: {
-  label: string;
-  children: React.ReactNode;
-  active?: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      className={`icon-button${active ? " is-active" : ""}`}
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  );
+function Field({ label, value, unit, min = 0, max, step = 1, onChange }: { label: string; value: number; unit: string; min?: number; max?: number; step?: number; onChange: (value: number) => void }) {
+  return <label className="seat-field"><span>{label}</span><span className="seat-input"><input type="number" value={value} min={min} max={max} step={step} onChange={event => { const next = event.currentTarget.valueAsNumber; if (Number.isFinite(next)) onChange(next); }} /><b>{unit}</b></span></label>;
 }
 
-function NumberField({
-  label,
-  value,
-  unit,
-  min = 0.01,
-  step = 0.1,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  unit: string;
-  min?: number;
-  step?: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label>
-      <span>{label}</span>
-      <span className="input-with-unit">
-        <input
-          type="number"
-          value={value}
-          min={min}
-          step={step}
-          inputMode="decimal"
-          onChange={(event) => onChange(Number(event.target.value))}
-        />
-        <b>{unit}</b>
-      </span>
-    </label>
-  );
+function Range({ label, value, min, max, onChange, low, high }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void; low: string; high: string }) {
+  return <label className="range-field"><span>{label}<em>{value}</em></span><input aria-label={label} type="range" value={value} min={min} max={max} onChange={event => onChange(Number(event.target.value))} /><small><i>{low}</i><i>{high}</i></small></label>;
 }
 
-function formatDuration(minutes: number) {
-  if (!minutes || !Number.isFinite(minutes)) return "--:--";
-  const totalSeconds = Math.max(1, Math.round(minutes * 60));
-  const hours = Math.floor(totalSeconds / 3600);
-  const mins = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  return hours > 0
-    ? `${hours}:${String(mins).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
-    : `${mins}:${String(seconds).padStart(2, "0")}`;
+function StepProgress({ step, enabled, onStep }: { step: Step; enabled: boolean; onStep: (step: Step) => void }) {
+  return <nav className="step-progress" aria-label="作業の進み具合">{stepLabels.map((label, index) => {
+    const id = (index + 1) as Step;
+    return <div className={`step-item ${step === id ? "is-active" : ""} ${step > id ? "is-done" : ""}`} key={label}>
+      <button onClick={() => onStep(id)} disabled={id > 1 && !enabled}><span>{step > id ? <Check /> : id}</span><b>{label}</b></button>
+      {id < 3 && <i />}
+    </div>;
+  })}</nav>;
 }
 
-function clonePaths(paths: ToolPath[]) {
-  return paths.map((path) => ({
-    ...path,
-    points: path.points.map((point) => ({ ...point })),
-  }));
+function CheckItem({ ok, text }: { ok: boolean; text: string }) {
+  return <div className={ok ? "checked" : ""}><span>{ok ? <Check /> : "!"}</span>{text}</div>;
 }
 
-function safeFileName(value: string) {
-  const printable = Array.from(value.trim(), (character) => character.charCodeAt(0) < 32 ? "_" : character).join("");
-  return printable.replace(/[<>:"/\\|?*]/g, "_") || "toolpath";
+function Decorations() {
+  return <div className="chair-decorations" aria-hidden="true">
+    <NextImage className="chair-decor chair-a" src="/chairs/image1.png" width={210} height={221} alt="" />
+    <NextImage className="chair-decor chair-b" src="/chairs/image2.png" width={190} height={214} alt="" />
+    <NextImage className="chair-decor chair-c" src="/chairs/image5.png" width={180} height={193} alt="" />
+    <NextImage className="chair-decor chair-d" src="/chairs/image6.png" width={200} height={208} alt="" />
+    <NextImage className="chair-decor chair-e" src="/chairs/image7.png" width={170} height={201} alt="" />
+    <NextImage className="chair-decor chair-f" src="/chairs/image8.png" width={150} height={166} alt="" />
+    <NextImage className="chair-decor chair-g" src="/chairs/image1.png" width={142} height={150} alt="" />
+    <NextImage className="chair-decor chair-h" src="/chairs/image5.png" width={138} height={148} alt="" />
+    <NextImage className="chair-decor chair-i" src="/chairs/image2.png" width={146} height={164} alt="" />
+    <NextImage className="chair-decor chair-j" src="/chairs/image6.png" width={140} height={145} alt="" />
+    <NextImage className="chair-decor chair-k" src="/chairs/image8.png" width={132} height={146} alt="" />
+    <NextImage className="chair-decor chair-l" src="/chairs/image7.png" width={128} height={151} alt="" />
+  </div>;
 }
 
-function downloadText(content: string, fileName: string) {
-  const blob = new Blob([content], { type: "text/plain;charset=us-ascii" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  link.click();
-  URL.revokeObjectURL(url);
-}
+function polyline(points: SeatPoint[], height: number) { return points.map(point => `${point.x},${height - point.y}`).join(" "); }
+function downloadText(text: string, name: string) { const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
 
-function openProjectDatabase() {
-  return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(PROJECT_DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(PROJECT_STORE_NAME)) {
-        request.result.createObjectStore(PROJECT_STORE_NAME);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("保存領域を開けませんでした。"));
-  });
-}
-
-async function readSavedProject() {
-  const database = await openProjectDatabase();
-  try {
-    return await new Promise<SavedProject | null>((resolve, reject) => {
-      const transaction = database.transaction(PROJECT_STORE_NAME, "readonly");
-      const request = transaction.objectStore(PROJECT_STORE_NAME).get(CURRENT_PROJECT_KEY);
-      request.onsuccess = () => resolve((request.result as SavedProject | undefined) ?? null);
-      request.onerror = () => reject(request.error ?? new Error("保存データを読み込めませんでした。"));
-    });
-  } finally {
-    database.close();
-  }
-}
-
-async function writeSavedProject(project: SavedProject) {
-  const database = await openProjectDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction(PROJECT_STORE_NAME, "readwrite");
-      transaction.objectStore(PROJECT_STORE_NAME).put(project, CURRENT_PROJECT_KEY);
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error ?? new Error("保存できませんでした。"));
-      transaction.onabort = () => reject(transaction.error ?? new Error("保存が中断されました。"));
-    });
-  } finally {
-    database.close();
-  }
-}
-
-export default function Home() {
-  const [view, setView] = useState<"2d" | "3d">("2d");
-  const [activeSection, setActiveSection] = useState<SectionName>("file");
-  const [drawing, setDrawing] = useState<ParsedDrawing | null>(null);
+export default function SeatWorkshop() {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const processingRequestRef = useRef(0);
+  const transformDragRef = useRef<TransformDrag | null>(null);
+  const tabDragRef = useRef<TabDrag | null>(null);
+  const suppressTabClickRef = useRef(false);
+  const [step, setStep] = useState<Step>(1);
+  const [staffOpen, setStaffOpen] = useState(false);
   const [fileName, setFileName] = useState("");
-  const [origin, setOrigin] = useState<MaterialOrigin>("lower-left");
-  const [materialWidth, setMaterialWidth] = useState(300);
-  const [materialHeight, setMaterialHeight] = useState(200);
-  const [materialThickness, setMaterialThickness] = useState(18);
-  const [isDragging, setIsDragging] = useState(false);
-  const [error, setError] = useState("");
-  const [displayPaths, setDisplayPaths] = useState<ToolPath[]>([]);
-  const [selectedPathIds, setSelectedPathIds] = useState<string[]>([]);
-  const [calculatedToolpaths, setCalculatedToolpaths] = useState<CalculatedToolpath[]>([]);
-  const [toolpathName, setToolpathName] = useState("ツールパス 1");
-  const [editingToolpathId, setEditingToolpathId] = useState<string | null>(null);
-  const [exportMode, setExportMode] = useState<ExportMode>("combined");
-  const [storageReady, setStorageReady] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("loading");
-  const [savedAt, setSavedAt] = useState<number | null>(null);
-  const [cornerMode, setCornerMode] = useState<CornerEditMode>("select");
-  const [closeTolerance, setCloseTolerance] = useState(0.1);
-  const [pathNotice, setPathNotice] = useState("");
-  const [showClosePanel, setShowClosePanel] = useState(false);
-  const [editorRevision, setEditorRevision] = useState(0);
-  const [bitLibrary, setBitLibrary] = useState<BitDefinition[]>(() => defaultBitLibrary.map((bit) => ({ ...bit })));
-  const [activeBitId, setActiveBitId] = useState(defaultBitLibrary[0].id);
-  const [bitNotice, setBitNotice] = useState("");
-  const [isBitEditorOpen, setIsBitEditorOpen] = useState(false);
-  const [settings, setSettings] = useState<CamSettings>(defaultCamSettings);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const panelRef = useRef<HTMLElement>(null);
-  const previewRef = useRef<PreviewHandle>(null);
-  const skipNextDocumentResetRef = useRef(false);
-  const saveSequenceRef = useRef(0);
-  const sectionRefs = useRef<Record<SectionName, HTMLElement | null>>({
-    file: null,
-    cut: null,
-    bit: null,
-    material: null,
-    settings: null,
-  });
+  const [imageUrl, setImageUrl] = useState("");
+  const [threshold, setThreshold] = useState(142);
+  const [gapClosing, setGapClosing] = useState(50);
+  const [smoothing, setSmoothing] = useState(58);
+  const [imageOpacity, setImageOpacity] = useState(24);
+  const [corners, setCorners] = useState<SeatPoint[]>(defaultCorners);
+  const [calibrating, setCalibrating] = useState(false);
+  const [pendingCorners, setPendingCorners] = useState<SeatPoint[]>([]);
+  const [rawOutline, setRawOutline] = useState<SeatPoint[]>([]);
+  const [pathScale, setPathScale] = useState(100);
+  const [pathOffsetX, setPathOffsetX] = useState(0);
+  const [pathOffsetY, setPathOffsetY] = useState(0);
+  const [transforming, setTransforming] = useState(false);
+  const [extractMessage, setExtractMessage] = useState("");
+  const [confidence, setConfidence] = useState<"good" | "fair" | "poor">("poor");
+  const [processing, setProcessing] = useState(false);
+  const [boardWidth, setBoardWidth] = useState(400);
+  const [boardHeight, setBoardHeight] = useState(400);
+  const [boardThickness, setBoardThickness] = useState(24);
+  const [exportGeometryMode, setExportGeometryMode] = useState<ExportGeometryMode>("seat-with-mortises");
+  const [mortiseLayout, setMortiseLayout] = useState<MortiseLayout>("four");
+  const [mortiseWidth, setMortiseWidth] = useState(24);
+  const [mortiseHeight, setMortiseHeight] = useState(48);
+  const [mortiseGapX, setMortiseGapX] = useState(102);
+  const [mortiseGapY, setMortiseGapY] = useState(102);
+  const [mortiseDepth, setMortiseDepth] = useState(12);
+  const [bitDiameter, setBitDiameter] = useState(6);
+  const [stepDown, setStepDown] = useState(3.2);
+  const [feedRate, setFeedRate] = useState(1000);
+  const [plungeRate, setPlungeRate] = useState(300);
+  const [safeZ, setSafeZ] = useState(2);
+  const [spindleRpm, setSpindleRpm] = useState(18000);
+  const [tabWidth, setTabWidth] = useState(12);
+  const [tabHeight, setTabHeight] = useState(3);
+  const [tabs, setTabs] = useState<number[]>([]);
+  const [tabEditing, setTabEditing] = useState(false);
+  const [showToolpath, setShowToolpath] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [savedStaffSignature, setSavedStaffSignature] = useState(JSON.stringify(defaultStaffSettings));
+
+  const staffSettings = useMemo<StaffSettings>(() => ({
+    threshold, gapClosing, imageOpacity, boardWidth, boardHeight, boardThickness,
+    exportGeometryMode, mortiseLayout, mortiseWidth, mortiseHeight, mortiseGapX, mortiseGapY, mortiseDepth,
+    bitDiameter, stepDown, feedRate, plungeRate, safeZ, spindleRpm, tabWidth, tabHeight, showToolpath,
+  }), [threshold, gapClosing, imageOpacity, boardWidth, boardHeight, boardThickness, exportGeometryMode, mortiseLayout, mortiseWidth, mortiseHeight, mortiseGapX, mortiseGapY, mortiseDepth, bitDiameter, stepDown, feedRate, plungeRate, safeZ, spindleRpm, tabWidth, tabHeight, showToolpath]);
+  const staffSignature = JSON.stringify(staffSettings);
+  const staffSettingsDirty = settingsLoaded && staffSignature !== savedStaffSignature;
 
   useEffect(() => {
-    let active = true;
-    readSavedProject()
-      .then((saved) => {
-        if (!active || !saved || saved.version !== 1) return;
-        skipNextDocumentResetRef.current = true;
-        setFileName(saved.fileName);
-        setDrawing(saved.drawing);
-        setDisplayPaths(clonePaths(saved.displayPaths));
-        setCalculatedToolpaths(saved.calculatedToolpaths);
-        setSettings({ ...defaultCamSettings, ...saved.settings });
-        const restoredBits = saved.bitLibrary?.length ? saved.bitLibrary : defaultBitLibrary;
-        setBitLibrary(restoredBits.map((bit) => ({ ...bit })));
-        setActiveBitId(restoredBits.some((bit) => bit.id === saved.activeBitId) ? saved.activeBitId! : restoredBits[0].id);
-        setOrigin(saved.origin);
-        setMaterialWidth(saved.materialWidth);
-        setMaterialHeight(saved.materialHeight);
-        setMaterialThickness(saved.materialThickness);
-        setExportMode(saved.exportMode);
-        setToolpathName(saved.toolpathName);
-        setView(saved.view);
-        setSavedAt(saved.savedAt);
-      })
-      .catch(() => {
-        if (active) setSaveStatus("error");
-      })
-      .finally(() => {
-        if (!active) return;
-        if (!skipNextDocumentResetRef.current) skipNextDocumentResetRef.current = true;
-        setStorageReady(true);
-        setSaveStatus((current) => current === "error" ? current : "saved");
-      });
-    return () => { active = false; };
-  }, []);
-
-  const baseDisplayPaths = useMemo(
-    () => pathsForMaterial(drawing?.paths ?? [], origin, materialWidth, materialHeight),
-    [drawing, origin, materialWidth, materialHeight],
-  );
-  const boardBounds = useMemo(
-    () => getMaterialBounds(materialWidth, materialHeight, origin),
-    [materialWidth, materialHeight, origin],
-  );
-  const displayBounds = useMemo(() => getBounds(displayPaths), [displayPaths]);
-  const pathsOutsideMaterial = displayPaths.length > 0 && (
-    displayBounds.minX < boardBounds.minX - 0.001
-    || displayBounds.minY < boardBounds.minY - 0.001
-    || displayBounds.maxX > boardBounds.maxX + 0.001
-    || displayBounds.maxY > boardBounds.maxY + 0.001
-  );
-
-  useEffect(() => {
-    if (!storageReady) return;
-    if (skipNextDocumentResetRef.current) {
-      skipNextDocumentResetRef.current = false;
-      return;
-    }
-    // A file or origin change starts a fresh editing document.
-    setDisplayPaths(clonePaths(baseDisplayPaths));
-    setSelectedPathIds([]);
-    setCalculatedToolpaths([]);
-    setEditingToolpathId(null);
-    setToolpathName("ツールパス 1");
-    setCornerMode("select");
-    setPathNotice("");
-    setShowClosePanel(false);
-    setEditorRevision((current) => current + 1);
-  }, [baseDisplayPaths, storageReady]);
-  const selectedPaths = useMemo(
-    () => displayPaths.filter((path) => selectedPathIds.includes(path.id)),
-    [displayPaths, selectedPathIds],
-  );
-  const depths = useMemo(() => {
+    let saved: StaffSettings | null = null;
     try {
-      return buildPassDepths(settings.finalDepth, settings.stepDown);
+      const raw = window.localStorage.getItem(staffSettingsKey);
+      if (raw) saved = normalizeStaffSettings(JSON.parse(raw));
     } catch {
-      return [];
+      window.localStorage.removeItem(staffSettingsKey);
     }
-  }, [settings.finalDepth, settings.stepDown]);
-  const estimatedMinutes = useMemo(() => {
-    try {
-      return estimateMinutes(selectedPaths, settings);
-    } catch {
-      return 0;
-    }
-  }, [selectedPaths, settings]);
-  const activeBit = useMemo(
-    () => bitLibrary.find((bit) => bit.id === activeBitId) ?? bitLibrary[0],
-    [activeBitId, bitLibrary],
-  );
-
-  const selectBit = (id: string) => {
-    const bit = bitLibrary.find((item) => item.id === id);
-    if (!bit) return;
-    setActiveBitId(bit.id);
-    setSettings((current) => ({ ...current, ...settingsForBit(bit) }));
-    setBitNotice("");
-  };
-
-  const updateBitNumber = (key: "cuttingDiameter" | "shankDiameter" | "fluteLength" | "overallLength" | "fluteCount" | "spindleRpm" | "feedRate" | "plungeRate" | "vAngle" | "tipDiameter", value: number) => {
-    if (!activeBit) return;
-    setBitLibrary((current) => current.map((bit) => bit.id === activeBit.id ? { ...bit, [key]: value } : bit));
-    const settingKeys: Partial<Record<typeof key, NumericCamSetting>> = {
-      cuttingDiameter: "bitDiameter",
-      fluteCount: "fluteCount",
-      spindleRpm: "spindleRpm",
-      feedRate: "feedRate",
-      plungeRate: "plungeRate",
-    };
-    const settingKey = settingKeys[key];
-    if (settingKey) setSettings((current) => ({ ...current, [settingKey]: value }));
-    setBitNotice("");
-  };
-
-  const updateBitName = (name: string) => {
-    if (!activeBit) return;
-    setBitLibrary((current) => current.map((bit) => bit.id === activeBit.id ? { ...bit, name } : bit));
-    setSettings((current) => ({ ...current, toolName: name }));
-    setBitNotice("");
-  };
-
-  const updateBitType = (type: BitType) => {
-    if (!activeBit) return;
-    setBitLibrary((current) => current.map((bit) => bit.id === activeBit.id ? { ...bit, type } : bit));
-    setSettings((current) => ({ ...current, toolType: type }));
-    setBitNotice("");
-  };
-
-  const updateBitNotes = (notes: string) => {
-    if (!activeBit) return;
-    setBitLibrary((current) => current.map((bit) => bit.id === activeBit.id ? { ...bit, notes } : bit));
-    setBitNotice("");
-  };
-
-  const addBit = () => {
-    const source = activeBit ?? defaultBitLibrary[0];
-    const bit: BitDefinition = {
-      ...source,
-      id: crypto.randomUUID(),
-      name: `${bitTypeLabels[source.type]} 新規ビット`,
-    };
-    setBitLibrary((current) => [...current, bit]);
-    setActiveBitId(bit.id);
-    setSettings((current) => ({ ...current, ...settingsForBit(bit) }));
-    setBitNotice("");
-    setIsBitEditorOpen(true);
-  };
-
-  const deleteBit = () => {
-    if (!activeBit || bitLibrary.length <= 1) {
-      setBitNotice("ライブラリには1本以上のビットが必要です");
-      return;
-    }
-    const next = bitLibrary.filter((bit) => bit.id !== activeBit.id);
-    const replacement = next[0];
-    setBitLibrary(next);
-    setActiveBitId(replacement.id);
-    setSettings((current) => ({ ...current, ...settingsForBit(replacement) }));
-    setBitNotice("");
-  };
-
-  const projectSnapshot = useMemo<SavedProject>(() => ({
-    version: 1,
-    savedAt: 0,
-    fileName,
-    drawing,
-    displayPaths: clonePaths(displayPaths),
-    calculatedToolpaths,
-    settings: { ...settings },
-    origin,
-    materialWidth,
-    materialHeight,
-    materialThickness,
-    exportMode,
-    toolpathName,
-    view,
-    bitLibrary,
-    activeBitId,
-  }), [
-    activeBitId,
-    bitLibrary,
-    calculatedToolpaths,
-    displayPaths,
-    drawing,
-    exportMode,
-    fileName,
-    materialHeight,
-    materialThickness,
-    materialWidth,
-    origin,
-    settings,
-    toolpathName,
-    view,
-  ]);
-
-  const saveProject = useCallback(async () => {
-    if (!storageReady) return;
-    const sequence = saveSequenceRef.current + 1;
-    saveSequenceRef.current = sequence;
-    const nextSavedAt = Date.now();
-    setSaveStatus("saving");
-    try {
-      await writeSavedProject({ ...projectSnapshot, savedAt: nextSavedAt });
-      if (saveSequenceRef.current !== sequence) return;
-      setSavedAt(nextSavedAt);
-      setSaveStatus("saved");
-    } catch {
-      if (saveSequenceRef.current === sequence) setSaveStatus("error");
-    }
-  }, [projectSnapshot, storageReady]);
-
-  const saveBitToLibrary = () => {
-    setBitNotice("ビットライブラリに保存しました");
-    void saveProject();
-    setIsBitEditorOpen(false);
-  };
-
-  useEffect(() => {
-    if (!storageReady) return;
-    const timer = window.setTimeout(() => { void saveProject(); }, 350);
-    return () => window.clearTimeout(timer);
-  }, [projectSnapshot, saveProject, storageReady]);
-
-  useEffect(() => {
-    if (!editingToolpathId || view !== "2d") return;
-    const job = calculatedToolpaths.find((toolpath) => toolpath.id === editingToolpathId);
-    if (!job) return;
-    const frame = requestAnimationFrame(() => previewRef.current?.selectPaths?.(job.pathIds));
-    return () => cancelAnimationFrame(frame);
-  }, [calculatedToolpaths, editingToolpathId, view]);
-
-  const updateSetting = (key: NumericCamSetting, value: number) => {
-    setSettings((current) => ({ ...current, [key]: value }));
-  };
-
-  const changeOrigin = (value: MaterialOrigin) => {
-    setOrigin(value);
-  };
-
-  const loadFile = async (file?: File) => {
-    if (!file) return;
-    setError("");
-    if (!file.name.toLowerCase().endsWith(".dxf")) {
-      setError("DXFファイル（.dxf）を選択してください。");
-      return;
-    }
-    if (file.size > 25 * 1024 * 1024) {
-      setError("ファイルが大きすぎます。25MB以下のDXFを試してください。");
-      return;
-    }
-    try {
-      const parsed = parseDxfText(await file.text());
-      setDrawing(parsed);
-      setFileName(file.name);
-      setMaterialWidth((current) => Math.max(current, Math.ceil(parsed.bounds.width)));
-      setMaterialHeight((current) => Math.max(current, Math.ceil(parsed.bounds.height)));
-      setActiveSection("cut");
-    } catch (caught) {
-      setDrawing(null);
-      setFileName("");
-      setError(caught instanceof Error ? caught.message : "DXFの読み込みに失敗しました。");
-    }
-  };
-
-  const clearFile = () => {
-    setDrawing(null);
-    setFileName("");
-    setError("");
-    if (inputRef.current) inputRef.current.value = "";
-  };
-
-  const resetPathEdits = () => {
-    setDisplayPaths(clonePaths(baseDisplayPaths));
-    setSelectedPathIds([]);
-    setCornerMode("select");
-    setPathNotice("");
-    setShowClosePanel(false);
-    setEditorRevision((current) => current + 1);
-  };
-
-  const connectAndClosePaths = () => {
-    setError("");
-    try {
-      const result = closeOpenPaths(displayPaths, closeTolerance);
-      if (!result.joinedCount && !result.closedCount) {
-        setPathNotice("許容値内に接続できる端点はありません");
-        return;
+    const frame = window.requestAnimationFrame(() => {
+      if (saved) {
+        setThreshold(saved.threshold); setGapClosing(saved.gapClosing); setImageOpacity(saved.imageOpacity);
+        setBoardWidth(saved.boardWidth); setBoardHeight(saved.boardHeight); setBoardThickness(saved.boardThickness);
+        setExportGeometryMode(saved.exportGeometryMode); setMortiseLayout(saved.mortiseLayout); setMortiseWidth(saved.mortiseWidth); setMortiseHeight(saved.mortiseHeight); setMortiseGapX(saved.mortiseGapX); setMortiseGapY(saved.mortiseGapY); setMortiseDepth(saved.mortiseDepth);
+        setBitDiameter(saved.bitDiameter); setStepDown(saved.stepDown); setFeedRate(saved.feedRate); setPlungeRate(saved.plungeRate); setSafeZ(saved.safeZ); setSpindleRpm(saved.spindleRpm); setTabWidth(saved.tabWidth); setTabHeight(saved.tabHeight); setShowToolpath(saved.showToolpath);
+        setSavedStaffSignature(JSON.stringify(saved));
       }
-      setDisplayPaths(result.paths);
-      setSelectedPathIds([]);
-      setCornerMode("select");
-      setEditorRevision((current) => current + 1);
-      setPathNotice(`接続 ${result.joinedCount}・閉合 ${result.closedCount}`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "パスを閉じられませんでした。");
-    }
-  };
-
-  const handleSelectionChange = useCallback((pathIds: string[]) => {
-    setSelectedPathIds(pathIds);
-    if (pathIds.length !== 1) setCornerMode("select");
+      setSettingsLoaded(true);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
-  const goToSection = (section: SectionName) => {
-    setActiveSection(section);
-    sectionRefs.current[section]?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const saveStaffSettings = () => {
+    window.localStorage.setItem(staffSettingsKey, staffSignature);
+    setSavedStaffSignature(staffSignature);
   };
 
-  const calculate = () => {
-    setError("");
-    if (!drawing) {
-      setError("先にDXFファイルを読み込んでください。");
-      goToSection("file");
-      return;
-    }
-    if (materialWidth <= 0 || materialHeight <= 0 || materialThickness <= 0) {
-      setError("材料のW・H・Dは0より大きい値にしてください。");
-      goToSection("material");
-      return;
-    }
-    if (!selectedPaths.length) {
-      setError("加工するパスを2D画面で選択してください。");
-      setView("2d");
-      return;
-    }
-    const name = toolpathName.trim();
-    if (!name) {
-      setError("ツールパス名を入力してください。");
-      return;
-    }
-    if (calculatedToolpaths.some((toolpath) => toolpath.name === name && toolpath.id !== editingToolpathId)) {
-      setError("同じツールパス名があります。別の名前を入力してください。");
-      return;
-    }
+  const corrected = useMemo(() => {
+    const normalized = perspectiveCorrect(rawOutline, corners).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+    if (!normalized.length) return [];
+    const placed = normalized.map(point => ({ x: point.x * boardWidth, y: (1 - point.y) * boardHeight }));
+    const xs = placed.map(point => point.x), ys = placed.map(point => point.y);
+    const centerX = (Math.min(...xs) + Math.max(...xs)) / 2, centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const scale = pathScale / 100;
+    return placed.map(point => ({ x: centerX + (point.x - centerX) * scale + pathOffsetX, y: centerY + (point.y - centerY) * scale + pathOffsetY }));
+  }, [rawOutline, corners, boardWidth, boardHeight, pathScale, pathOffsetX, pathOffsetY]);
+
+  const outlineBox = useMemo(() => {
+    if (corrected.length < 3) return null;
+    const xs = corrected.map(point => point.x), ys = corrected.map(point => boardHeight - point.y);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+  }, [corrected, boardHeight]);
+  const outside = useMemo(() => offsetPolygon(corrected, bitDiameter / 2), [corrected, bitDiameter]);
+  const mortises = useMemo(() => buildMortises(boardWidth, boardHeight, mortiseWidth, mortiseHeight, mortiseGapX, mortiseGapY, mortiseLayout), [boardWidth, boardHeight, mortiseWidth, mortiseHeight, mortiseGapX, mortiseGapY, mortiseLayout]);
+  const mortiseOutlines = useMemo(() => mortiseLayoutOutlines(mortises, mortiseLayout, bitDiameter), [mortises, mortiseLayout, bitDiameter]);
+  const includeOutlineInExport = exportGeometryMode !== "mortises-only";
+  const exportedMortises = exportGeometryMode === "outline-only" ? [] : mortises;
+  const exportedMortiseOutlines = exportGeometryMode === "outline-only" ? [] : mortiseOutlines;
+  const outsideLength = useMemo(() => closedPathLength(outside), [outside]);
+  const tabMarkers = useMemo(() => tabs.map((position, index) => ({
+    index, position,
+    center: pointOnClosedPath(outside, position),
+    start: pointOnClosedPath(outside, position - (outsideLength > 0 ? tabWidth / outsideLength / 2 : 0)),
+    end: pointOnClosedPath(outside, position + (outsideLength > 0 ? tabWidth / outsideLength / 2 : 0)),
+  })), [tabs, outside, outsideLength, tabWidth]);
+  const mortisesWithinBoard = useMemo(() => mortises.every(mortise => {
+    const pad = bitDiameter;
+    return mortise.x - mortise.width / 2 - pad >= 0 && mortise.x + mortise.width / 2 + pad <= boardWidth
+      && mortise.y - mortise.height / 2 - pad >= 0 && mortise.y + mortise.height / 2 + pad <= boardHeight;
+  }), [mortises, bitDiameter, boardWidth, boardHeight]);
+  const mortisesInside = useMemo(() => exportGeometryMode === "outline-only" ? true : exportGeometryMode === "mortises-only" ? mortisesWithinBoard : (corrected.length > 2 && mortises.every(mortise => {
+    const pad = bitDiameter;
+    return [{ x: mortise.x - mortise.width / 2 - pad, y: mortise.y - mortise.height / 2 - pad }, { x: mortise.x + mortise.width / 2 + pad, y: mortise.y - mortise.height / 2 - pad }, { x: mortise.x + mortise.width / 2 + pad, y: mortise.y + mortise.height / 2 + pad }, { x: mortise.x - mortise.width / 2 - pad, y: mortise.y + mortise.height / 2 + pad }].every(point => pointInPolygon(point, corrected));
+  })), [corrected, mortises, bitDiameter, exportGeometryMode, mortisesWithinBoard]);
+  const outlineInsideBoard = corrected.length > 2 && corrected.every(point => point.x >= 0 && point.x <= boardWidth && point.y >= 0 && point.y <= boardHeight);
+  const outlineSafe = corrected.length > 2 && !polygonSelfIntersects(corrected) && !polygonSelfIntersects(outside);
+  const cuttingSettingsValid = Number.isFinite(stepDown) && stepDown > 0 && stepDown <= 3.2 + 1e-6
+    && Number.isFinite(mortiseDepth) && mortiseDepth > 0 && mortiseDepth <= boardThickness + 1e-6
+    && Number.isFinite(safeZ) && safeZ > 0
+    && Number.isFinite(tabWidth) && tabWidth > 0
+    && Number.isFinite(tabHeight) && tabHeight > 0 && tabHeight <= boardThickness;
+  const outlineChecksPass = exportGeometryMode === "mortises-only" || (corrected.length > 2 && outlineInsideBoard && outlineSafe);
+  const shapeReadyForNext = exportGeometryMode === "mortises-only" ? mortisesWithinBoard : outlineInsideBoard && outlineSafe;
+  const ready = outlineChecksPass && mortisesInside && cuttingSettingsValid;
+
+  const processImage = useCallback(async () => {
+    const image = imageRef.current;
+    if (!image) return;
+    const requestId = ++processingRequestRef.current;
+    setProcessing(true);
+    const maxPixels = 420, canvasScale = maxPixels / Math.max(boardWidth, boardHeight), canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(boardWidth * canvasScale));
+    canvas.height = Math.max(1, Math.round(boardHeight * canvasScale));
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) { setProcessing(false); return; }
+    context.fillStyle = "white";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const sourceWidth = image.naturalWidth || image.width, sourceHeight = image.naturalHeight || image.height;
+    const fit = Math.min(canvas.width / sourceWidth, canvas.height / sourceHeight), drawWidth = sourceWidth * fit, drawHeight = sourceHeight * fit;
+    context.drawImage(image, (canvas.width - drawWidth) / 2, (canvas.height - drawHeight) / 2, drawWidth, drawHeight);
     try {
-      const paths = clonePaths(selectedPaths);
-      const output = generateGcode(paths, settings, `${fileName} / ${name}`);
-      const toolpath: CalculatedToolpath = {
-        id: editingToolpathId ?? crypto.randomUUID(),
-        name,
-        pathIds: paths.map((path) => path.id),
-        paths,
-        settings: { ...settings },
-        gcode: output,
-        estimatedMinutes: estimateMinutes(paths, settings),
-        passCount: buildPassDepths(settings.finalDepth, settings.stepDown).length,
-      };
-      setCalculatedToolpaths((current) => editingToolpathId
-        ? current.map((item) => item.id === editingToolpathId ? toolpath : item)
-        : [...current, toolpath]);
-      setEditingToolpathId(null);
-      setToolpathName(`ツールパス ${calculatedToolpaths.length + (editingToolpathId ? 1 : 2)}`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "ツールパスを作成できませんでした。");
-    }
-  };
+      const result = await extractSeatOutlineWithOpenCV(context.getImageData(0, 0, canvas.width, canvas.height), threshold, smoothing, gapClosing, corners);
+      if (requestId !== processingRequestRef.current) return;
+      setRawOutline(result.points); setConfidence(result.confidence); setExtractMessage(result.confidence === "good" ? "きれいな形が見つかりました！" : result.confidence === "fair" ? "形が見つかりました。つぎの画面で整えられます" : "形をうまく見つけられませんでした。スタッフと確認してください");
+    } catch {
+      if (requestId !== processingRequestRef.current) return;
+      setRawOutline([]); setConfidence("poor"); setExtractMessage("写真から形を見つけられませんでした。スタッフと確認してください");
+    } finally { if (requestId === processingRequestRef.current) setProcessing(false); }
+  }, [threshold, smoothing, gapClosing, corners, boardWidth, boardHeight]);
+  useEffect(() => { const timer = window.setTimeout(() => void processImage(), 100); return () => window.clearTimeout(timer); }, [processImage, imageUrl]);
 
-  const editToolpath = (toolpath: CalculatedToolpath) => {
-    setEditingToolpathId(toolpath.id);
-    setToolpathName(toolpath.name);
-    setSettings({ ...toolpath.settings });
-    setSelectedPathIds([...toolpath.pathIds]);
-    setCornerMode("select");
-    setView("2d");
-    setError("");
+  const resetPathTransform = () => { setPathScale(100); setPathOffsetX(0); setPathOffsetY(0); };
+  const loadFile = (file?: File) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => { const image = new Image(); image.onload = () => { imageRef.current = image; setImageUrl(String(reader.result)); }; image.src = String(reader.result); };
+    reader.readAsDataURL(file); setFileName(file.name); setCorners(defaultCorners); resetPathTransform(); setTabs([]); setTabEditing(false); setStep(1);
   };
-
-  const cancelToolpathEdit = () => {
-    setEditingToolpathId(null);
-    setToolpathName(`ツールパス ${calculatedToolpaths.length + 1}`);
+  const nearestPathPosition = (points: SeatPoint[], target: SeatPoint) => {
+    const total = closedPathLength(points);
+    let travelled = 0, bestDistance = Number.POSITIVE_INFINITY, bestPosition = 0;
+    points.forEach((start, index) => {
+      const end = points[(index + 1) % points.length];
+      const dx = end.x - start.x, dy = end.y - start.y, lengthSquared = dx * dx + dy * dy;
+      const ratio = lengthSquared > 0 ? Math.max(0, Math.min(1, ((target.x - start.x) * dx + (target.y - start.y) * dy) / lengthSquared)) : 0;
+      const projected = { x: start.x + dx * ratio, y: start.y + dy * ratio };
+      const distance = Math.hypot(target.x - projected.x, target.y - projected.y);
+      const segmentLength = Math.sqrt(lengthSquared);
+      if (distance < bestDistance) { bestDistance = distance; bestPosition = total > 0 ? (travelled + segmentLength * ratio) / total : 0; }
+      travelled += segmentLength;
+    });
+    return { position: bestPosition, distance: bestDistance };
   };
-
-  const deleteToolpath = (id: string) => {
-    setCalculatedToolpaths((current) => current.filter((toolpath) => toolpath.id !== id));
-    if (editingToolpathId === id) cancelToolpathEdit();
-  };
-
-  const downloadGcode = () => {
-    if (!calculatedToolpaths.length) return;
-    const baseName = safeFileName(fileName.replace(/\.dxf$/i, "") || "camee");
-    if (exportMode === "combined") {
-      const output = calculatedToolpaths.map((toolpath, index) => [
-        `; ===== TOOLPATH ${index + 1}: ${toolpath.name.replace(/[^\x20-\x7e]/g, "_")} =====`,
-        toolpath.gcode.trim(),
-      ].join("\n")).join("\n\n");
-      downloadText(`${output}\n`, `${baseName}-all.gcode`);
+  const handlePreviewClick = (event: React.MouseEvent<SVGSVGElement>) => {
+    const svgPoint = event.currentTarget.createSVGPoint(); svgPoint.x = event.clientX; svgPoint.y = event.clientY;
+    const matrix = event.currentTarget.getScreenCTM(); if (!matrix) return;
+    const local = svgPoint.matrixTransform(matrix.inverse());
+    if (tabEditing) {
+      if (suppressTabClickRef.current) { suppressTabClickRef.current = false; return; }
+      const nearest = nearestPathPosition(outside, { x: local.x, y: boardHeight - local.y });
+      if (nearest.distance <= Math.max(18, bitDiameter * 2)) setTabs(current => [...current, nearest.position]);
       return;
     }
-    calculatedToolpaths.forEach((toolpath, index) => {
-      downloadText(toolpath.gcode, `${baseName}-${index + 1}-${safeFileName(toolpath.name)}.gcode`);
-    });
+    if (!calibrating) return;
+    const point = { x: Math.max(0, Math.min(1, local.x / boardWidth)), y: Math.max(0, Math.min(1, local.y / boardHeight)) }, next = [...pendingCorners, point];
+    if (next.length === 4) { setCorners(next); setPendingCorners([]); setCalibrating(false); } else setPendingCorners(next);
   };
+  const pointerInPreview = (svg: SVGSVGElement, clientX: number, clientY: number) => { const point = svg.createSVGPoint(); point.x = clientX; point.y = clientY; const matrix = svg.getScreenCTM(); return matrix ? point.matrixTransform(matrix.inverse()) : null; };
+  const startMove = (event: React.PointerEvent<SVGRectElement>) => {
+    if (calibrating) return; const svg = event.currentTarget.ownerSVGElement, point = svg && pointerInPreview(svg, event.clientX, event.clientY); if (!point) return;
+    event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); transformDragRef.current = { mode: "move", pointerId: event.pointerId, start: { x: point.x, y: point.y }, offsetX: pathOffsetX, offsetY: pathOffsetY }; setTransforming(true);
+  };
+  const startScale = (event: React.PointerEvent<SVGCircleElement>, corner: BoxCorner) => {
+    if (calibrating || !outlineBox) return;
+    const left = outlineBox.x, right = outlineBox.x + outlineBox.width, top = outlineBox.y, bottom = outlineBox.y + outlineBox.height;
+    const handles = { nw: { x: left, y: top }, ne: { x: right, y: top }, se: { x: right, y: bottom }, sw: { x: left, y: bottom } }, opposites = { nw: handles.se, ne: handles.sw, se: handles.nw, sw: handles.ne }, handle = handles[corner], opposite = opposites[corner];
+    event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); transformDragRef.current = { mode: "scale", pointerId: event.pointerId, opposite, diagonal: { x: handle.x - opposite.x, y: handle.y - opposite.y }, center: { x: (left + right) / 2, y: (top + bottom) / 2 }, scale: pathScale, offsetX: pathOffsetX, offsetY: pathOffsetY }; setTransforming(true);
+  };
+  const startTabDrag = (event: React.PointerEvent<SVGCircleElement>, index: number) => {
+    if (!tabEditing) return;
+    event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
+    tabDragRef.current = { pointerId: event.pointerId, index, startPosition: tabs[index], moved: false };
+  };
+  const updateTransform = (event: React.PointerEvent<SVGSVGElement>) => {
+    const tabDrag = tabDragRef.current;
+    if (tabDrag?.pointerId === event.pointerId) {
+      const point = pointerInPreview(event.currentTarget, event.clientX, event.clientY); if (!point) return;
+      const nearest = nearestPathPosition(outside, { x: point.x, y: boardHeight - point.y });
+      if (Math.abs(nearest.position - tabDrag.startPosition) > .001) tabDrag.moved = true;
+      setTabs(current => current.map((position, index) => index === tabDrag.index ? nearest.position : position));
+      event.preventDefault(); return;
+    }
+    const drag = transformDragRef.current; if (!drag || drag.pointerId !== event.pointerId) return;
+    const point = pointerInPreview(event.currentTarget, event.clientX, event.clientY); if (!point) return; event.preventDefault();
+    if (drag.mode === "move") { setPathOffsetX(Math.round((drag.offsetX + point.x - drag.start.x) * 10) / 10); setPathOffsetY(Math.round((drag.offsetY - (point.y - drag.start.y)) * 10) / 10); return; }
+    const lengthSquared = drag.diagonal.x ** 2 + drag.diagonal.y ** 2; if (lengthSquared < 1e-6) return;
+    const projected = ((point.x - drag.opposite.x) * drag.diagonal.x + (point.y - drag.opposite.y) * drag.diagonal.y) / lengthSquared, nextScale = Math.round(Math.max(25, Math.min(200, drag.scale * projected))), factor = nextScale / drag.scale, nextCenter = { x: drag.opposite.x + (drag.center.x - drag.opposite.x) * factor, y: drag.opposite.y + (drag.center.y - drag.opposite.y) * factor };
+    setPathScale(nextScale); setPathOffsetX(Math.round((drag.offsetX + nextCenter.x - drag.center.x) * 10) / 10); setPathOffsetY(Math.round((drag.offsetY - (nextCenter.y - drag.center.y)) * 10) / 10);
+  };
+  const endTransform = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (tabDragRef.current?.pointerId === event.pointerId) { suppressTabClickRef.current = tabDragRef.current.moved; tabDragRef.current = null; return; }
+    if (transformDragRef.current?.pointerId !== event.pointerId) return; transformDragRef.current = null; setTransforming(false);
+  };
+  const exportGcode = () => { if (!ready) return; const code = generateSeatGcode(corrected, exportedMortises, { boardWidth, boardHeight, boardThickness, mortiseDepth, bitDiameter, stepDown, stepover: .42, feedRate, plungeRate, rapidFeed: 2400, safeZ, spindleRpm, tabs, tabWidth, tabHeight }, fileName || "seat-workshop", { includeOutline: includeOutlineInExport }); const base = (fileName || "seat-workshop").replace(/\.[^.]+$/, "").replace(/[^\w\-\u3040-\u30ff\u3400-\u9fff]+/g, "_"); const suffix = exportGeometryMode === "outline-only" ? "_輪郭のみ" : exportGeometryMode === "mortises-only" ? "_ほぞ穴のみ" : ""; downloadText(code, `${base}${suffix}_加工データ.gcode`); };
+  const exportDxf = () => { if (!ready) return; const code = generateSeatDxf(corrected, exportedMortises, bitDiameter, mortiseLayout, { includeOutline: includeOutlineInExport }); const base = (fileName || "seat-workshop").replace(/\.[^.]+$/, "").replace(/[^\w\-\u3040-\u30ff\u3400-\u9fff]+/g, "_"); const suffix = exportGeometryMode === "outline-only" ? "_輪郭のみ" : exportGeometryMode === "mortises-only" ? "_ほぞ穴のみ" : ""; downloadText(code, `${base}${suffix}_図面.dxf`); };
 
-  return (
-    <main className="cam-shell">
-      <header className="topbar">
-        <div className="brand" aria-label="CAMEE">
-          <span className="brand-mark">C</span>
-          <span>CAMEE</span>
-          <span className="version">BETA</span>
-        </div>
-        <div className="top-actions" aria-label="ファイル操作">
-          <IconButton label="DXFを開く" onClick={() => inputRef.current?.click()}>
-            <FolderOpen size={19} />
-          </IconButton>
-          <IconButton label="プロジェクトを保存" disabled={!storageReady || saveStatus === "saving"} onClick={() => { void saveProject(); }}>
-            {saveStatus === "saved" ? <Check size={18} /> : <Save size={18} />}
-          </IconButton>
-          <span className={`save-status is-${saveStatus}`}>
-            {saveStatus === "loading" ? "読込中" : saveStatus === "saving" ? "保存中" : saveStatus === "error" ? "保存エラー" : savedAt ? "保存済み" : "自動保存"}
-          </span>
-          {fileName && <span className="top-file-name">{fileName}</span>}
-        </div>
-        <button className="export-button" type="button" disabled={!calculatedToolpaths.length} onClick={downloadGcode}>
-          <Download size={17} />
-          <span>G-code</span>
-        </button>
-      </header>
+  const seatCanvas = <div className="board-stage"><svg className={`seat-canvas ${calibrating ? "is-calibrating" : ""} ${tabEditing ? "is-tab-editing" : ""} ${outlineBox && !calibrating && !tabEditing ? "has-transform-box" : ""} ${transforming ? "is-transforming" : ""}`} viewBox={`0 0 ${boardWidth} ${boardHeight}`} style={{ aspectRatio: `${boardWidth} / ${boardHeight}` }} onClick={handlePreviewClick} onPointerMove={updateTransform} onPointerUp={endTransform} onPointerCancel={endTransform}>
+    <rect x="1.5" y="1.5" width={boardWidth - 3} height={boardHeight - 3} rx="5" fill="#f4d7a1" stroke="#d6a45d" strokeWidth="3" />
+    {imageUrl && <image href={imageUrl} x="10" y="10" width={boardWidth - 20} height={boardHeight - 20} preserveAspectRatio="xMidYMid meet" opacity={imageOpacity / 100} />}{corrected.length > 2 && <polygon points={polyline(corrected, boardHeight)} className="seat-shape" />}{includeOutlineInExport && (showToolpath || tabEditing) && outside.length > 2 && <polygon points={polyline(outside, boardHeight)} className="outside-path" />}
+    <g className="mortise">{exportedMortiseOutlines.map((outline, index) => <polygon key={`mortise-outline-${index}`} points={polyline(outline, boardHeight)} />)}<title>{mortiseLayout === "cross" ? "十字のほぞ穴" : "4つのほぞ穴"}</title></g>
+    {showToolpath && exportedMortises.map(mortise => <polyline key={`pocket-path-${mortise.id}`} points={polyline(mortisePocketPath(mortise, bitDiameter, .42), boardHeight)} className="pocket-path" />)}
+    <g className={`profile-tabs ${tabEditing ? "is-editing" : ""}`}>{tabMarkers.map(marker => <g key={`tab-${marker.index}`}><line x1={marker.start.x} y1={boardHeight - marker.start.y} x2={marker.end.x} y2={boardHeight - marker.end.y} /><circle cx={marker.center.x} cy={boardHeight - marker.center.y} r="7" onPointerDown={event => startTabDrag(event, marker.index)} onClick={event => { event.stopPropagation(); if (suppressTabClickRef.current) { suppressTabClickRef.current = false; return; } if (tabEditing) setTabs(current => current.filter((_, index) => index !== marker.index)); }} /><text x={marker.center.x} y={boardHeight - marker.center.y + 3}>{marker.index + 1}</text></g>)}</g>
+    {calibrating && pendingCorners.map((corner, index) => <g key={index} className="calibration-point"><circle cx={corner.x * boardWidth} cy={corner.y * boardHeight} r="7" /><text x={corner.x * boardWidth} y={corner.y * boardHeight + 3}>{index + 1}</text></g>)}
+    {outlineBox && !calibrating && !tabEditing && <g className="outline-transform"><rect className="transform-hit-area" x={outlineBox.x} y={outlineBox.y} width={outlineBox.width} height={outlineBox.height} onPointerDown={startMove} /><rect className="transform-frame" x={outlineBox.x} y={outlineBox.y} width={outlineBox.width} height={outlineBox.height} />{([['nw', outlineBox.x, outlineBox.y], ['ne', outlineBox.x + outlineBox.width, outlineBox.y], ['se', outlineBox.x + outlineBox.width, outlineBox.y + outlineBox.height], ['sw', outlineBox.x, outlineBox.y + outlineBox.height]] as const).map(([corner, x, y]) => <circle key={corner} className="transform-handle" cx={x} cy={y} r="7" onPointerDown={event => startScale(event, corner)} />)}</g>}
+  </svg>{calibrating && <div className="calibration-hint"><Crosshair /><b>{pendingCorners.length + 1}/4</b> {['左上', '右上', '右下', '左下'][pendingCorners.length]}をクリック</div>}{tabEditing && <div className="tab-edit-panel"><span>輪郭をクリックして追加・丸をドラッグして移動・丸をクリックして削除</span><div><button type="button" disabled={!tabs.length} onClick={() => setTabs([])}>すべて削除</button><button type="button" onClick={() => setTabEditing(false)}>完了</button></div></div>}</div>;
 
-      <aside className="tool-rail" aria-label="加工ツール">
-        {toolButtons.map(({ id, label, icon: Icon }) => (
-          <IconButton key={id} label={label} active={activeSection === id} onClick={() => goToSection(id)}>
-            <Icon size={20} />
-          </IconButton>
-        ))}
+  return <main className={`workshop-app step-${step}`}><Decorations /><input ref={fileRef} className="visually-hidden" type="file" accept="image/*" onChange={event => loadFile(event.target.files?.[0])} />
+    <header className="workshop-header"><h1><NextImage src="/chairs/workshop-logo.png" width={1774} height={887} priority alt="みんなでイスをつくろう" /></h1><button className="staff-button" onClick={() => setStaffOpen(true)}><Settings2 />スタッフ設定</button><StepProgress step={step} enabled={corrected.length > 2} onStep={setStep} /></header>
+
+    {step === 1 && <section className="step-page photo-step"><div className="page-heading"><i /><h2>デザインの写真をよみこもう</h2><i /></div><div className="photo-layout"><button className={`big-photo-button ${imageUrl ? "has-photo" : ""}`} onClick={() => fileRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); loadFile(event.dataTransfer.files[0]); }}>{imageUrl ? <><svg className="photo-preview-svg" role="img" aria-label="よみこんだデザイン"><image href={imageUrl} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" /></svg><span className="change-photo"><ImagePlus />写真をかえる</span></> : <><NextImage className="upload-chair" src="/chairs/image8.png" width={1193} height={1318} alt="" /><strong><Upload />写真をえらぶ</strong></>}</button></div>{imageUrl && <div className={`scan-status ${confidence}`}>{processing ? <NextImage className="chair-loader" src="/chairs/image7.png" width={1153} height={1364} alt="" /> : corrected.length ? <Check /> : <AlertTriangle />}<span>{processing ? "写真から形をさがしています…" : extractMessage}</span></div>}<div className="page-actions single"><button className="big-primary" disabled={!corrected.length || processing} onClick={() => setStep(2)}>つぎへ<ChevronRight /></button></div></section>}
+
+    {step === 2 && <section className="step-page shape-step"><div className="page-heading"><i /><h2>ざめんの形を決めよう</h2><i /></div><div className="shape-layout"><aside className="kid-controls"><div className="kid-card smooth-card"><h3><span>〜</span>線をきれいに</h3><Range label="なめらかさ" value={smoothing} min={0} max={100} onChange={setSmoothing} low="手がきの感じ" high="なめらか" /></div></aside><div className="board-card">{seatCanvas}</div><aside className={`kid-warning ${mortisesInside && shapeReadyForNext ? "is-ok" : ""}`}><span>{mortisesInside && shapeReadyForNext ? <Check /> : <AlertTriangle />}</span><p>{exportGeometryMode === "mortises-only" ? (mortisesWithinBoard ? "ほぞ穴だけを書き出すモードです" : "ほぞ穴が材料からはみ出しています") : !outlineInsideBoard ? "形が板からはみ出しています" : !outlineSafe ? "輪郭に鋭い折り返しがあります。なめらかさを調整してください" : exportGeometryMode === "outline-only" ? "輪郭だけを書き出すモードです" : !mortisesInside ? "脚をつける場所に重なっています。DXFはそのまま保存できます" : "脚をつける場所もだいじょうぶ！"}</p></aside></div><div className="page-actions"><button className="big-secondary" onClick={() => fileRef.current?.click()}><ImagePlus />写真をえらび直す</button><button className="big-primary" disabled={!shapeReadyForNext} onClick={() => setStep(3)}>この形でOK<ChevronRight /></button></div></section>}
+
+    {step === 3 && <section className="step-page send-step"><div className="page-heading"><i /><h2>マシンにおくる準備</h2><i /></div><div className="finish-layout"><div className="finish-board"><h3>できあがりの形</h3><svg viewBox={`0 0 ${boardWidth} ${boardHeight}`}><rect width={boardWidth} height={boardHeight} rx="8" fill="#f7d9a3" />{includeOutlineInExport && corrected.length > 2 && <polygon points={polyline(corrected, boardHeight)} fill="#fff5e4" stroke="#18a6a5" strokeWidth="4" />}{exportedMortiseOutlines.map((outline, index) => <polygon key={`finish-mortise-${index}`} points={polyline(outline, boardHeight)} fill="#b47a3a" />)}{includeOutlineInExport && <g className="profile-tabs">{tabMarkers.map(marker => <line key={`finish-tab-${marker.index}`} x1={marker.start.x} y1={boardHeight - marker.start.y} x2={marker.end.x} y2={boardHeight - marker.end.y} />)}</g>}</svg></div><div className="finish-card"><h3><ShieldCheck />スタッフといっしょに確認</h3><div className="friendly-checks"><CheckItem ok={includeOutlineInExport ? corrected.length > 2 && outlineSafe : mortisesWithinBoard} text={includeOutlineInExport ? "輪郭が安全につながっている" : "ほぞ穴が材料の中に入っている"} /><CheckItem ok={includeOutlineInExport ? outlineInsideBoard : true} text={includeOutlineInExport ? "形が板の中に入っている" : "外周加工を含まない"} /><CheckItem ok={mortisesInside} text={exportGeometryMode === "outline-only" ? "輪郭だけを書き出す" : exportGeometryMode === "mortises-only" ? "ほぞ穴だけを書き出す" : "脚をつける場所と重なっていない"} /><CheckItem ok={cuttingSettingsValid} text="スタッフの準備ができている" /></div></div></div><div className={`ready-message ${ready ? "is-ready" : ""}`}>{ready ? <><Check /><b>準備できました</b></> : includeOutlineInExport && !outlineInsideBoard ? <><AlertTriangle /><b>形が板からはみ出しています</b><span>形を板の中へ移動してください</span></> : includeOutlineInExport && !outlineSafe ? <><AlertTriangle /><b>輪郭に鋭い折り返しがあります</b><span>なめらかさを調整してください</span></> : !mortisesInside ? <><AlertTriangle /><b>{exportGeometryMode === "mortises-only" ? "ほぞ穴が材料からはみ出しています" : "DXFは保存できます"}</b><span>{exportGeometryMode === "mortises-only" ? "ほぞ穴の寸法と間隔を確認してください" : "ほぞ穴と重なっているため、加工データの保存は無効です"}</span></> : !cuttingSettingsValid ? <><AlertTriangle /><b>スタッフ設定を確認してください</b><span>ポケット深さと1回の切削深さを確認します</span></> : <><AlertTriangle /><b>形を確認してください</b></>}</div><div className="page-actions export-actions"><button className="big-secondary action-back" onClick={() => setStep(2)}><ChevronLeft />形を直す</button><button className="big-secondary" disabled={!ready} onClick={exportDxf}><Download />図面（DXF）を保存</button><button className="big-primary download-button" disabled={!ready} onClick={exportGcode}><Download />加工データを保存</button></div></section>}
+
+    {staffOpen && <div className="staff-layer">
+      <button className="staff-scrim" aria-label="スタッフ設定を閉じる" onClick={() => setStaffOpen(false)} />
+      <aside className="staff-panel" role="dialog" aria-modal="true" aria-label="スタッフ設定">
+        <header><div><small>STAFF ONLY</small><h2><Settings2 />スタッフ設定</h2></div><button aria-label="閉じる" onClick={() => setStaffOpen(false)}><X /></button></header>
+        <section><h3><SlidersHorizontal />写真の読み取り</h3><Range label="線の抽出しきい値" value={threshold} min={55} max={225} onChange={setThreshold} low="濃い線だけ" high="薄い線も" /><Range label="線の切れ目補正" value={gapClosing} min={0} max={100} onChange={setGapClosing} low="小さい切れ目" high="大きい切れ目" /><Range label="写真の濃さ" value={imageOpacity} min={0} max={80} onChange={setImageOpacity} low="薄く" high="濃く" /><button className="staff-outline-button" disabled={!imageUrl} onClick={() => { setStaffOpen(false); setStep(2); setCalibrating(true); setPendingCorners([]); }}><Focus />用紙の四隅を指定</button></section>
+        <section><h3><Ruler />材料とほぞ穴</h3><div className="field-grid">
+          <div className="mortise-layout-field"><span>書き出し内容</span><div role="group" aria-label="書き出し内容"><button type="button" className={exportGeometryMode === "seat-with-mortises" ? "is-active" : ""} aria-pressed={exportGeometryMode === "seat-with-mortises"} onClick={() => setExportGeometryMode("seat-with-mortises")}>輪郭＋ほぞ穴</button><button type="button" className={exportGeometryMode === "outline-only" ? "is-active" : ""} aria-pressed={exportGeometryMode === "outline-only"} onClick={() => setExportGeometryMode("outline-only")}>輪郭のみ</button><button type="button" className={exportGeometryMode === "mortises-only" ? "is-active" : ""} aria-pressed={exportGeometryMode === "mortises-only"} onClick={() => setExportGeometryMode("mortises-only")}>ほぞ穴のみ</button></div></div>
+          <Field label="材料の幅" value={boardWidth} unit="mm" min={100} onChange={setBoardWidth} />
+          <Field label="材料の奥行き" value={boardHeight} unit="mm" min={100} onChange={setBoardHeight} />
+          <Field label="板厚" value={boardThickness} unit="mm" min={3} step={.5} onChange={value => { setBoardThickness(value); setMortiseDepth(current => Math.min(current, value)); setTabHeight(current => Math.min(current, value)); }} />
+          {exportGeometryMode !== "outline-only" && <><div className="mortise-layout-field"><span>ほぞ穴の形状</span><div role="group" aria-label="ほぞ穴の形状"><button type="button" className={mortiseLayout === "four" ? "is-active" : ""} aria-pressed={mortiseLayout === "four"} onClick={() => setMortiseLayout("four")}>4つのほぞ穴</button><button type="button" className={mortiseLayout === "cross" ? "is-active" : ""} aria-pressed={mortiseLayout === "cross"} onClick={() => setMortiseLayout("cross")}>十字の形状</button></div></div><Field label="穴の幅" value={mortiseWidth} unit="mm" min={bitDiameter} onChange={setMortiseWidth} /><Field label="穴の長さ" value={mortiseHeight} unit="mm" min={bitDiameter} onChange={setMortiseHeight} /><Field label={mortiseLayout === "cross" ? "十字の横：中央の長さ" : "左右の穴：内側の間隔"} value={mortiseGapX} unit="mm" min={0} max={Math.max(0, boardWidth - mortiseHeight * 2)} onChange={value => setMortiseGapX(Math.max(0, Math.min(value, boardWidth - mortiseHeight * 2)))} /><Field label={mortiseLayout === "cross" ? "十字の縦：中央の長さ" : "上下の穴：内側の間隔"} value={mortiseGapY} unit="mm" min={0} max={Math.max(0, boardHeight - mortiseHeight * 2)} onChange={value => setMortiseGapY(Math.max(0, Math.min(value, boardHeight - mortiseHeight * 2)))} /><Field label="ポケット深さ" value={mortiseDepth} unit="mm" min={.5} max={boardThickness} step={.5} onChange={value => setMortiseDepth(Math.max(.5, Math.min(value, boardThickness)))} /></>}
+        </div></section>
+        <section><h3><Settings2 />切削条件</h3>
+          <div className="field-grid"><Field label="ビット径" value={bitDiameter} unit="mm" min={1} step={.1} onChange={setBitDiameter} /><Field label="1回の切削深さ" value={stepDown} unit="mm" min={.1} max={3.2} step={.1} onChange={value => setStepDown(Math.max(.1, Math.min(3.2, value)))} /><Field label="XY送り速度" value={feedRate} unit="mm/min" min={50} onChange={setFeedRate} /><Field label="Z送り速度" value={plungeRate} unit="mm/min" min={20} onChange={setPlungeRate} /><Field label="パス間退避高さ" value={safeZ} unit="mm" min={.1} step={.5} onChange={value => setSafeZ(Math.max(.1, value))} /><Field label="回転数の目安" value={spindleRpm} unit="rpm" min={1000} step={500} onChange={setSpindleRpm} /><Field label="タブの幅" value={tabWidth} unit="mm" min={1} step={1} onChange={value => setTabWidth(Math.max(1, value))} /><Field label="タブの高さ" value={tabHeight} unit="mm" min={.5} max={boardThickness} step={.5} onChange={value => setTabHeight(Math.max(.5, Math.min(value, boardThickness)))} /></div>
+          {includeOutlineInExport && <button className="staff-outline-button" disabled={corrected.length < 3} onClick={() => { setStaffOpen(false); setStep(2); setTabEditing(true); setCalibrating(false); }}>{tabs.length ? `タブ位置を編集（${tabs.length}か所）` : "タブ位置を編集"}</button>}
+          <p className="staff-note">パス間退避の初期値はZ2.000 mmです。設定値を変更しても、XY移動とZ切込みは必ず分離します。</p>
+          <p className="staff-note">ドッグボーンはビット径に合わせて最小限で自動追加されます。</p>
+          <label className="toolpath-toggle"><input type="checkbox" checked={showToolpath} onChange={event => setShowToolpath(event.target.checked)} /><span />加工パスを表示</label>
+        </section>
+        {settingsLoaded && <footer className={`staff-savebar ${staffSettingsDirty ? "is-dirty" : ""}`} aria-live="polite">
+          <span>{staffSettingsDirty ? "変更はまだ保存されていません" : <><Check />設定は保存済みです</>}</span>
+          {staffSettingsDirty && <button type="button" onClick={saveStaffSettings}>設定を保存</button>}
+        </footer>}
       </aside>
-
-      <aside className="settings-panel" ref={panelRef}>
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".dxf,application/dxf"
-          hidden
-          onChange={(event) => loadFile(event.target.files?.[0])}
-        />
-
-        {error && (
-          <div className="alert" role="alert">
-            <CircleAlert size={17} />
-            <span>{error}</span>
-          </div>
-        )}
-
-        <section className="panel-section file-section" ref={(node) => { sectionRefs.current.file = node; }}>
-          <div className="section-heading">
-            <span className="step-number">1</span>
-            <div><h2>DXFファイル</h2><p>加工する図面を読み込む</p></div>
-          </div>
-          {drawing ? (
-            <div className="file-card">
-              <FileType2 size={22} />
-              <div>
-                <strong>{fileName}</strong>
-                <span>{displayBounds.width.toFixed(1)} × {displayBounds.height.toFixed(1)} mm · {drawing.paths.length} パス</span>
-              </div>
-              <IconButton label="ファイルを外す" onClick={clearFile}><Trash2 size={17} /></IconButton>
-            </div>
-          ) : (
-            <button
-              className={`drop-zone${isDragging ? " is-dragging" : ""}`}
-              type="button"
-              onClick={() => inputRef.current?.click()}
-              onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }}
-              onDragOver={(event) => event.preventDefault()}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={(event) => {
-                event.preventDefault();
-                setIsDragging(false);
-                loadFile(event.dataTransfer.files[0]);
-              }}
-            >
-              <Upload size={22} />
-              <span>ファイルを選択</span>
-              <small>またはここにドロップ</small>
-            </button>
-          )}
-          {drawing?.unitWarning && <p className="field-note"><Info size={13} /> {drawing.unitWarning}</p>}
-          {!!drawing?.unsupportedTypes.length && <p className="field-note"><Info size={13} /> 対象外: {drawing.unsupportedTypes.join(", ")}</p>}
-        </section>
-
-        <section className="panel-section" ref={(node) => { sectionRefs.current.cut = node; }}>
-          <div className="section-heading">
-            <span className="step-number">2</span>
-            <div><h2>彫り込み</h2><p>DXFの線の中心を加工</p></div>
-          </div>
-          <div className="field-grid">
-            <NumberField label="最終深さ" value={settings.finalDepth} unit="mm" onChange={(value) => updateSetting("finalDepth", value)} />
-            <NumberField label="1回の深さ" value={settings.stepDown} unit="mm" onChange={(value) => updateSetting("stepDown", value)} />
-          </div>
-          <div className="pass-summary">
-            <Layers3 size={17} /><span>加工回数</span><strong>{depths.length || "-"} パス</strong>
-          </div>
-          <label className="toggle-row">
-            <span className="toggle-label"><TrendingDown size={16} />ランプ進入</span>
-            <input
-              type="checkbox"
-              checked={settings.rampEnabled}
-              onChange={(event) => {
-                setSettings((current) => ({ ...current, rampEnabled: event.target.checked }));
-              }}
-            />
-            <span className="toggle-control" aria-hidden="true" />
-          </label>
-          {settings.rampEnabled && (
-            <div className="single-field">
-              <NumberField label="ランプ長さ" value={settings.rampLength} unit="mm" onChange={(value) => updateSetting("rampLength", value)} />
-            </div>
-          )}
-        </section>
-
-        <section className="panel-section" ref={(node) => { sectionRefs.current.bit = node; }}>
-          <div className="section-heading">
-            <span className="step-number">3</span>
-            <div><h2>ビット</h2><p>{activeBit ? bitTypeLabels[activeBit.type] : "ビットを選択"}</p></div>
-          </div>
-          {activeBit && (
-            <div className="bit-compact-card">
-              <label className="select-field">
-                <span>登録ビット</span>
-                <select value={activeBit.id} onChange={(event) => selectBit(event.target.value)}>
-                  {bitLibrary.map((bit) => <option key={bit.id} value={bit.id}>{bit.name}</option>)}
-                </select>
-              </label>
-              <div className="bit-compact-details">
-                <span>{bitTypeLabels[activeBit.type]}</span>
-                <span>Ø{activeBit.cuttingDiameter} mm</span>
-                <span>{activeBit.feedRate} mm/min</span>
-                <span>{activeBit.spindleRpm} rpm</span>
-              </div>
-              <div className="bit-compact-actions">
-                <IconButton label="ビットを編集" onClick={() => setIsBitEditorOpen(true)}><Pencil size={17} /></IconButton>
-                <IconButton label="新しいビットを追加" onClick={addBit}><Plus size={18} /></IconButton>
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section className="panel-section" ref={(node) => { sectionRefs.current.material = node; }}>
-          <div className="section-heading">
-            <span className="step-number">4</span>
-            <div><h2>材料</h2><p>サイズとXY原点</p></div>
-          </div>
-          <div className="field-grid is-three">
-            <NumberField label="W 幅" value={materialWidth} unit="mm" onChange={setMaterialWidth} />
-            <NumberField label="H 高さ" value={materialHeight} unit="mm" onChange={setMaterialHeight} />
-            <NumberField label="D 厚さ" value={materialThickness} unit="mm" onChange={setMaterialThickness} />
-          </div>
-          <div className="origin-setting">
-            <span className="origin-label"><Crosshair size={14} />XY原点</span>
-            <div className="origin-grid" role="group" aria-label="材料上のXY原点">
-              {materialOrigins.map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  className={origin === option.id ? "is-active" : ""}
-                  aria-label={option.label}
-                  title={option.label}
-                  onClick={() => changeOrigin(option.id)}
-                >
-                  <span />
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              className={`dxf-origin-button${origin === "dxf" ? " is-active" : ""}`}
-              onClick={() => changeOrigin("dxf")}
-            >
-              <Crosshair size={14} />
-              <span>DXF原点</span>
-            </button>
-          </div>
-          {pathsOutsideMaterial && <p className="field-note material-warning"><CircleAlert size={13} /> 材料の外側にパスがあります</p>}
-          {settings.finalDepth > materialThickness && <p className="field-note material-warning"><CircleAlert size={13} /> 加工深さが材料Dを超えています</p>}
-          <p className="field-note"><Info size={13} /> Z0は材料の上面</p>
-        </section>
-
-        <section className="panel-section" ref={(node) => { sectionRefs.current.settings = node; }}>
-          <div className="section-heading">
-            <span className="step-number">5</span>
-            <div><h2>出力設定</h2><p>GORDIX6 ポスト</p></div>
-          </div>
-          <div className="origin-summary"><Crosshair size={15} /><span>XY原点</span><strong>{originLabels[origin]}</strong></div>
-          <p className="field-note"><Ruler size={13} /> mm・絶対座標・退避高さ2mm・主軸は手動</p>
-        </section>
-
-        <div className="calculate-area">
-          <label className="toolpath-name-field">
-            <span>ツールパス名</span>
-            <input value={toolpathName} maxLength={60} onChange={(event) => setToolpathName(event.target.value)} />
-          </label>
-          <div className="calculate-selection"><MousePointer2 size={14} /><span>{selectedPathIds.length} パスを対象</span></div>
-          <button className={`calculate-button${editingToolpathId ? " is-editing" : ""}`} type="button" onClick={calculate}>
-            {editingToolpathId ? <Check size={18} /> : <Play size={18} fill="currentColor" />}
-            <span>{editingToolpathId ? "ツールパスを更新" : "ツールパスを計算"}</span>
-          </button>
-          {editingToolpathId && (
-            <button className="cancel-edit-button" type="button" onClick={cancelToolpathEdit}>編集をキャンセル</button>
-          )}
-        </div>
-      </aside>
-
-      {isBitEditorOpen && activeBit && (
-        <div className="bit-editor-overlay" role="presentation" onPointerDown={() => setIsBitEditorOpen(false)}>
-          <section
-            className="bit-editor-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label="ビットの編集"
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <div className="bit-editor-header">
-              <div><Drill size={18} /><h2>ビットを編集</h2></div>
-              <IconButton label="ビット編集を閉じる" onClick={() => setIsBitEditorOpen(false)}><X size={18} /></IconButton>
-            </div>
-            <div className="bit-editor-body">
-              <div className="bit-library-picker">
-                <label className="select-field">
-                  <span>登録ビット</span>
-                  <select value={activeBit.id} onChange={(event) => selectBit(event.target.value)}>
-                    {bitLibrary.map((bit) => <option key={bit.id} value={bit.id}>{bit.name}</option>)}
-                  </select>
-                </label>
-                <IconButton label="新しいビットを追加" onClick={addBit}><Plus size={17} /></IconButton>
-                <IconButton label="選択中のビットを削除" onClick={deleteBit}><Trash2 size={16} /></IconButton>
-              </div>
-              <label className="bit-name-field">
-                <span>ビット名</span>
-                <input value={activeBit.name} maxLength={60} onChange={(event) => updateBitName(event.target.value)} />
-              </label>
-              <label className="select-field bit-type-field">
-                <span>種類</span>
-                <select value={activeBit.type} onChange={(event) => updateBitType(event.target.value as BitType)}>
-                  {(Object.keys(bitTypeLabels) as BitType[]).map((type) => <option key={type} value={type}>{bitTypeLabels[type]}</option>)}
-                </select>
-              </label>
-              <div className="field-grid is-three bit-dimensions">
-                <NumberField label={activeBit.type === "v" ? "基準径" : "刃径"} value={activeBit.cuttingDiameter} unit="mm" onChange={(value) => updateBitNumber("cuttingDiameter", value)} />
-                <NumberField label="シャンク径" value={activeBit.shankDiameter} unit="mm" onChange={(value) => updateBitNumber("shankDiameter", value)} />
-                <NumberField label="刃長" value={activeBit.fluteLength} unit="mm" onChange={(value) => updateBitNumber("fluteLength", value)} />
-                <NumberField label="全長" value={activeBit.overallLength} unit="mm" onChange={(value) => updateBitNumber("overallLength", value)} />
-                <NumberField label="刃数" value={activeBit.fluteCount} unit="枚" min={1} step={1} onChange={(value) => updateBitNumber("fluteCount", value)} />
-                <NumberField label="主軸回転数" value={activeBit.spindleRpm} unit="rpm" min={1} step={500} onChange={(value) => updateBitNumber("spindleRpm", value)} />
-              </div>
-              {activeBit.type === "v" && (
-                <div className="field-grid bit-v-fields">
-                  <NumberField label="刃先角度" value={activeBit.vAngle} unit="deg" min={1} step={1} onChange={(value) => updateBitNumber("vAngle", value)} />
-                  <NumberField label="先端径" value={activeBit.tipDiameter} unit="mm" min={0} step={0.1} onChange={(value) => updateBitNumber("tipDiameter", value)} />
-                </div>
-              )}
-              <div className="field-grid bit-cutting-fields">
-                <NumberField label="送り速度" value={activeBit.feedRate} unit="mm/min" min={1} step={50} onChange={(value) => updateBitNumber("feedRate", value)} />
-                <NumberField label="切り込み速度" value={activeBit.plungeRate} unit="mm/min" min={1} step={50} onChange={(value) => updateBitNumber("plungeRate", value)} />
-              </div>
-              <label className="bit-notes-field">
-                <span>メモ</span>
-                <textarea value={activeBit.notes} rows={3} maxLength={240} onChange={(event) => updateBitNotes(event.target.value)} />
-              </label>
-              {bitNotice && <p className="field-note path-notice"><Check size={13} /> {bitNotice}</p>}
-            </div>
-            <div className="bit-editor-footer">
-              <button type="button" className="cancel-edit-button" onClick={() => setIsBitEditorOpen(false)}>キャンセル</button>
-              <button type="button" className="bit-save-button" onClick={saveBitToLibrary}>
-                <Save size={16} /><span>保存</span>
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
-
-      <section className="workspace" aria-label="プレビュー">
-        <div className="view-switch" aria-label="表示切り替え">
-          <button type="button" className={view === "2d" ? "is-active" : ""} onClick={() => setView("2d")}><Grid3X3 size={16} /> 2D</button>
-          <button type="button" className={view === "3d" ? "is-active" : ""} onClick={() => { setView("3d"); setShowClosePanel(false); }}><Rotate3d size={17} /> 3D</button>
-        </div>
-
-        {view === "2d" && drawing && (
-          <div className="edit-tools" aria-label="2D編集ツール">
-            <IconButton label="パス・ウィンドウ選択" active={cornerMode === "select"} onClick={() => setCornerMode("select")}><MousePointer2 size={18} /></IconButton>
-            <IconButton label="ドッグボーンをコーナーへ追加" active={cornerMode === "dogbone"} disabled={selectedPathIds.length !== 1} onClick={() => setCornerMode("dogbone")}><CircleDot size={18} /></IconButton>
-            <IconButton label="H型フィレットをコーナーへ追加" active={cornerMode === "tbone"} disabled={selectedPathIds.length !== 1} onClick={() => setCornerMode("tbone")}><UnfoldHorizontal size={18} /></IconButton>
-            <IconButton label="選択パスを10%縮小" disabled={!selectedPathIds.length} onClick={() => previewRef.current?.scaleSelection?.(0.9)}><Shrink size={18} /></IconButton>
-            <IconButton label="選択パスを10%拡大" disabled={!selectedPathIds.length} onClick={() => previewRef.current?.scaleSelection?.(1.1)}><Expand size={18} /></IconButton>
-            <IconButton label="選択パスを左へ15度回転" disabled={!selectedPathIds.length} onClick={() => previewRef.current?.rotateSelection?.(-15)}><RotateCcw size={18} /></IconButton>
-            <IconButton label="選択パスを右へ15度回転" disabled={!selectedPathIds.length} onClick={() => previewRef.current?.rotateSelection?.(15)}><RotateCw size={18} /></IconButton>
-            <IconButton label="パスの接続・閉合設定" active={showClosePanel} onClick={() => setShowClosePanel((current) => !current)}><Link2 size={18} /></IconButton>
-            <IconButton label="2D編集をリセット" onClick={resetPathEdits}><Undo2 size={18} /></IconButton>
-          </div>
-        )}
-
-        {view === "2d" && drawing && showClosePanel && (
-          <div className="close-path-popover" role="dialog" aria-label="パスの接続・閉合設定">
-            <div className="close-panel-heading"><Link2 size={16} /><strong>パスの接続・閉合</strong></div>
-            <NumberField label="接続許容値" value={closeTolerance} unit="mm" min={0} step={0.01} onChange={setCloseTolerance} />
-            <button type="button" className="path-action-button" disabled={!displayPaths.length} onClick={connectAndClosePaths}>
-              <Link2 size={17} />
-              <span>接続・閉じる</span>
-            </button>
-            {pathNotice && <p className="field-note path-notice"><Check size={13} /> {pathNotice}</p>}
-          </div>
-        )}
-
-        {view === "2d" ? (
-          <ToolpathEditor2D
-            key={`${fileName}-${origin}-${editorRevision}`}
-            ref={previewRef}
-            paths={displayPaths}
-            boardBounds={boardBounds}
-            bitDiameter={settings.bitDiameter}
-            cornerMode={cornerMode}
-            onSelectionChange={handleSelectionChange}
-            onPathsChange={(paths) => {
-              setDisplayPaths(paths);
-              setPathNotice("");
-            }}
-          />
-        ) : (
-          <ToolpathPreview
-            ref={previewRef}
-            paths={displayPaths}
-            depths={depths}
-            bitDiameter={settings.bitDiameter}
-            materialBounds={boardBounds}
-            materialThickness={materialThickness}
-            mode="3d"
-            rampEnabled={settings.rampEnabled}
-            rampLength={settings.rampLength}
-          />
-        )}
-        <div className="zoom-tools" aria-label="プレビュー操作">
-          <IconButton label="拡大" onClick={() => previewRef.current?.zoomIn()}><ZoomIn size={18} /></IconButton>
-          <IconButton label="縮小" onClick={() => previewRef.current?.zoomOut()}><ZoomOut size={18} /></IconButton>
-          <IconButton label="全体表示" onClick={() => previewRef.current?.fit()}><Maximize2 size={18} /></IconButton>
-        </div>
-
-        <footer className="statusbar">
-          <span><i className="status-dot" /> GORDIX6</span>
-          <span>原点: {originLabels[origin]}</span>
-          <span>単位: mm</span>
-          {!!selectedPathIds.length && <span>{cornerMode === "select" ? `${selectedPathIds.length} パス選択` : cornerMode === "dogbone" ? "ドッグボーン" : "H型フィレット"}</span>}
-          <span className="status-spacer" />
-          <span>パス {displayPaths.length} × {depths.length}</span>
-          <span>加工時間 {formatDuration(estimatedMinutes)}</span>
-        </footer>
-      </section>
-
-      <aside className="toolpath-panel" aria-label="計算済みツールパス">
-        <div className="toolpath-panel-heading">
-          <div><Layers3 size={17} /><h2>ツールパス</h2></div>
-          <span>{calculatedToolpaths.length}</span>
-        </div>
-
-        <div className="export-mode" role="group" aria-label="G-code書き出し方式">
-          <button
-            type="button"
-            className={exportMode === "combined" ? "is-active" : ""}
-            onClick={() => setExportMode("combined")}
-          >
-            <Files size={16} />
-            <span>一括</span>
-          </button>
-          <button
-            type="button"
-            className={exportMode === "separate" ? "is-active" : ""}
-            onClick={() => setExportMode("separate")}
-          >
-            <FileDown size={16} />
-            <span>個別</span>
-          </button>
-        </div>
-
-        <div className="toolpath-list">
-          {calculatedToolpaths.map((toolpath, index) => (
-            <article
-              key={toolpath.id}
-              className={`toolpath-card${editingToolpathId === toolpath.id ? " is-editing" : ""}`}
-            >
-              <div className="toolpath-order">{index + 1}</div>
-              <div className="toolpath-card-body">
-                <strong>{toolpath.name}</strong>
-                <span>{toolpath.pathIds.length} パス · {toolpath.passCount} 回 · Z-{toolpath.settings.finalDepth} mm</span>
-                <span>ビット Ø{toolpath.settings.bitDiameter} · {formatDuration(toolpath.estimatedMinutes)}</span>
-              </div>
-              <div className="toolpath-card-actions">
-                <IconButton label={`${toolpath.name}を編集`} active={editingToolpathId === toolpath.id} onClick={() => editToolpath(toolpath)}>
-                  <Pencil size={15} />
-                </IconButton>
-                <IconButton label={`${toolpath.name}を削除`} onClick={() => deleteToolpath(toolpath.id)}>
-                  <Trash2 size={15} />
-                </IconButton>
-              </div>
-            </article>
-          ))}
-          {!calculatedToolpaths.length && (
-            <div className="toolpath-empty"><Layers3 size={22} /><span>計算済みツールパスなし</span></div>
-          )}
-        </div>
-
-        <div className="toolpath-export-area">
-          <div className="toolpath-total">
-            <span>合計時間</span>
-            <strong>{formatDuration(calculatedToolpaths.reduce((total, item) => total + item.estimatedMinutes, 0))}</strong>
-          </div>
-          <button type="button" className="toolpath-export-button" disabled={!calculatedToolpaths.length} onClick={downloadGcode}>
-            <Download size={17} />
-            <span>{exportMode === "combined" ? "1ファイルで書き出す" : "個別に書き出す"}</span>
-          </button>
-        </div>
-      </aside>
-    </main>
-  );
+    </div>}
+  </main>;
 }

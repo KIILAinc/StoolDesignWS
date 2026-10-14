@@ -18,9 +18,9 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host") ?? "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "CAMEE";
-  const description = "DXFからGORDIX用の彫り込みツールパスとG-codeを作成するCAMアプリ";
-  const image = { url: `${origin}/og-camee.png`, width: 1731, height: 909, alt: "CAMEE toolpath workspace" };
+  const title = "みんなで椅子を作ろう";
+  const description = "手書きスケッチから椅子の座面を作る、子ども向けワークショップアプリ";
+  const image = { url: `${origin}/og-camee.png`, width: 1731, height: 909, alt: "みんなで椅子を作ろう" };
 
   return {
     metadataBase: new URL(origin),

@@ -15,6 +15,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@techstark/opencv-js": "^5.0.0-release.1",
     "@types/three": "^0.185.4",
     "drizzle-orm": "0.45.2",
     "dxf-parser": "^1.1.2",
