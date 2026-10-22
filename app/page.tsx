@@ -1,6 +1,6 @@
 "use client";
 
-import NextImage from "next/image";
+import NextImageBase, { type ImageProps } from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, Crosshair, Download, Focus, ImagePlus, Ruler, Settings2, ShieldCheck, SlidersHorizontal, Upload, X } from "lucide-react";
 import { buildMortises, closedPathLength, generateSeatDxf, generateSeatGcode, mortiseLayoutOutlines, mortisePocketPath, offsetPolygon, perspectiveCorrect, pointInPolygon, pointOnClosedPath, polygonSelfIntersects, type MortiseLayout, type SeatPoint } from "@/lib/seatCam";
@@ -20,6 +20,11 @@ type StaffSettings = {
   bitDiameter: number; stepDown: number; feedRate: number; plungeRate: number; safeZ: number; spindleRpm: number; tabWidth: number; tabHeight: number;
   showToolpath: boolean;
 };
+
+function NextImage(props: ImageProps) {
+  const src = typeof props.src === "string" && props.src.startsWith("/chairs/") ? `.${props.src}` : props.src;
+  return <NextImageBase {...props} src={src} />;
+}
 
 const defaultCorners: SeatPoint[] = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
 const stepLabels = ["写真をよみこむ", "ざめんの形を決める", "マシンにおくる"];
@@ -83,22 +88,23 @@ function CheckItem({ ok, text }: { ok: boolean; text: string }) {
 
 function Decorations() {
   return <div className="chair-decorations" aria-hidden="true">
-    <NextImage className="chair-decor chair-a" src="/chairs/image1.png" width={210} height={221} alt="" />
-    <NextImage className="chair-decor chair-b" src="/chairs/image2.png" width={190} height={214} alt="" />
-    <NextImage className="chair-decor chair-c" src="/chairs/image5.png" width={180} height={193} alt="" />
-    <NextImage className="chair-decor chair-d" src="/chairs/image6.png" width={200} height={208} alt="" />
-    <NextImage className="chair-decor chair-e" src="/chairs/image7.png" width={170} height={201} alt="" />
-    <NextImage className="chair-decor chair-f" src="/chairs/image8.png" width={150} height={166} alt="" />
-    <NextImage className="chair-decor chair-g" src="/chairs/image1.png" width={142} height={150} alt="" />
-    <NextImage className="chair-decor chair-h" src="/chairs/image5.png" width={138} height={148} alt="" />
-    <NextImage className="chair-decor chair-i" src="/chairs/image2.png" width={146} height={164} alt="" />
-    <NextImage className="chair-decor chair-j" src="/chairs/image6.png" width={140} height={145} alt="" />
-    <NextImage className="chair-decor chair-k" src="/chairs/image8.png" width={132} height={146} alt="" />
-    <NextImage className="chair-decor chair-l" src="/chairs/image7.png" width={128} height={151} alt="" />
+    <NextImage className="chair-decor chair-a" src={chairAsset("image1.png")} width={210} height={221} alt="" />
+    <NextImage className="chair-decor chair-b" src={chairAsset("image2.png")} width={190} height={214} alt="" />
+    <NextImage className="chair-decor chair-c" src={chairAsset("image5.png")} width={180} height={193} alt="" />
+    <NextImage className="chair-decor chair-d" src={chairAsset("image6.png")} width={200} height={208} alt="" />
+    <NextImage className="chair-decor chair-e" src={chairAsset("image7.png")} width={170} height={201} alt="" />
+    <NextImage className="chair-decor chair-f" src={chairAsset("image8.png")} width={150} height={166} alt="" />
+    <NextImage className="chair-decor chair-g" src={chairAsset("image1.png")} width={142} height={150} alt="" />
+    <NextImage className="chair-decor chair-h" src={chairAsset("image5.png")} width={138} height={148} alt="" />
+    <NextImage className="chair-decor chair-i" src={chairAsset("image2.png")} width={146} height={164} alt="" />
+    <NextImage className="chair-decor chair-j" src={chairAsset("image6.png")} width={140} height={145} alt="" />
+    <NextImage className="chair-decor chair-k" src={chairAsset("image8.png")} width={132} height={146} alt="" />
+    <NextImage className="chair-decor chair-l" src={chairAsset("image7.png")} width={128} height={151} alt="" />
   </div>;
 }
 
 function polyline(points: SeatPoint[], height: number) { return points.map(point => `${point.x},${height - point.y}`).join(" "); }
+function chairAsset(name: string) { return `./chairs/${name}`; }
 function downloadText(text: string, name: string) { const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = name; anchor.click(); URL.revokeObjectURL(url); }
 
 export default function SeatWorkshop() {
@@ -346,7 +352,7 @@ export default function SeatWorkshop() {
   </svg>{calibrating && <div className="calibration-hint"><Crosshair /><b>{pendingCorners.length + 1}/4</b> {['左上', '右上', '右下', '左下'][pendingCorners.length]}をクリック</div>}{tabEditing && <div className="tab-edit-panel"><span>輪郭をクリックして追加・丸をドラッグして移動・丸をクリックして削除</span><div><button type="button" disabled={!tabs.length} onClick={() => setTabs([])}>すべて削除</button><button type="button" onClick={() => setTabEditing(false)}>完了</button></div></div>}</div>;
 
   return <main className={`workshop-app step-${step}`}><Decorations /><input ref={fileRef} className="visually-hidden" type="file" accept="image/*" onChange={event => loadFile(event.target.files?.[0])} />
-    <header className="workshop-header"><h1><NextImage src="/chairs/workshop-logo.png" width={1774} height={887} priority alt="みんなでイスをつくろう" /></h1><button className="staff-button" onClick={() => setStaffOpen(true)}><Settings2 />スタッフ設定</button><StepProgress step={step} enabled={corrected.length > 2} onStep={setStep} /></header>
+    <header className="workshop-header"><h1><NextImage src={chairAsset("workshop-logo.png")} width={1774} height={887} priority alt="みんなでイスをつくろう" /></h1><button className="staff-button" onClick={() => setStaffOpen(true)}><Settings2 />スタッフ設定</button><StepProgress step={step} enabled={corrected.length > 2} onStep={setStep} /></header>
 
     {step === 1 && <section className="step-page photo-step"><div className="page-heading"><i /><h2>デザインの写真をよみこもう</h2><i /></div><div className="photo-layout"><button className={`big-photo-button ${imageUrl ? "has-photo" : ""}`} onClick={() => fileRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); loadFile(event.dataTransfer.files[0]); }}>{imageUrl ? <><svg className="photo-preview-svg" role="img" aria-label="よみこんだデザイン"><image href={imageUrl} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" /></svg><span className="change-photo"><ImagePlus />写真をかえる</span></> : <><NextImage className="upload-chair" src="/chairs/image8.png" width={1193} height={1318} alt="" /><strong><Upload />写真をえらぶ</strong></>}</button></div>{imageUrl && <div className={`scan-status ${confidence}`}>{processing ? <NextImage className="chair-loader" src="/chairs/image7.png" width={1153} height={1364} alt="" /> : corrected.length ? <Check /> : <AlertTriangle />}<span>{processing ? "写真から形をさがしています…" : extractMessage}</span></div>}<div className="page-actions single"><button className="big-primary" disabled={!corrected.length || processing} onClick={() => setStep(2)}>つぎへ<ChevronRight /></button></div></section>}
 
