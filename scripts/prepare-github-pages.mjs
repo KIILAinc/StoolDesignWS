@@ -14,7 +14,12 @@ async function rewriteDirectory(directory) {
     if (!textExtensions.has(path.extname(entry.name))) continue;
 
     const original = await readFile(filePath, "utf8");
-    const relative = original.replaceAll("/_next/", "./_next/").replaceAll("/chairs/", "./chairs/");
+    // Do not rewrite paths which are already relative (`./chairs/...`).
+    // The earlier broad replacement turned those into `../chairs/...`, which
+    // escapes the repository's Pages subpath and causes broken chair images.
+    const relative = original
+      .replace(/(?<!\.)\/_next\//g, "./_next/")
+      .replace(/(?<!\.)\/chairs\//g, "./chairs/");
     if (relative !== original) await writeFile(filePath, relative);
   }
 }
