@@ -22,12 +22,24 @@ type StaffSettings = {
 };
 
 function NextImage(props: ImageProps) {
-  const src = typeof props.src === "string" && props.src.startsWith("/chairs/") ? `.${props.src}` : props.src;
+  const chairMatch = typeof props.src === "string" && props.src.match(/(?:^\.?\/)?chairs\/(.+)$/);
+  // During static rendering, a relative source works in the Pages artifact.
+  // Once hydrated, use the current page path so /StoolDesignWS/ is retained.
+  const src = chairMatch
+    ? typeof window === "undefined"
+      ? `./chairs/${chairMatch[1]}`
+      : `${window.location.pathname.replace(/\/?$/, "/")}chairs/${chairMatch[1]}`
+    : props.src;
   return <NextImageBase {...props} src={src} />;
 }
 
 const defaultCorners: SeatPoint[] = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
 const stepLabels = ["写真をよみこむ", "ざめんの形を決める", "マシンにおくる"];
+const exportModes: Array<{ value: ExportGeometryMode; label: string }> = [
+  { value: "seat-with-mortises", label: "輪郭＋ほぞ穴" },
+  { value: "outline-only", label: "輪郭のみ" },
+  { value: "mortises-only", label: "ほぞ穴のみ" },
+];
 const staffSettingsKey = "chair-workshop:staff-settings:v1";
 const defaultStaffSettings: StaffSettings = {
   threshold: 142, gapClosing: 50, imageOpacity: 24,
@@ -57,7 +69,7 @@ function normalizeStaffSettings(value: unknown): StaffSettings {
     mortiseGapX: number("mortiseGapX", 102, 0, Math.max(0, boardWidth - mortiseHeight * 2)),
     mortiseGapY: number("mortiseGapY", 102, 0, Math.max(0, boardHeight - mortiseHeight * 2)),
     mortiseDepth: number("mortiseDepth", 12, .5, boardThickness),
-    bitDiameter, stepDown: number("stepDown", 3.2, .1, 3.2), feedRate: number("feedRate", 1000, 50),
+    bitDiameter, stepDown: number("stepDown", 3.2, .1, 6.4), feedRate: number("feedRate", 1000, 50),
     plungeRate: number("plungeRate", 300, 20), safeZ: number("safeZ", 2, .1), spindleRpm: number("spindleRpm", 18000, 1000),
     tabWidth: number("tabWidth", 12, 1), tabHeight: number("tabHeight", 3, .5, boardThickness),
     showToolpath: typeof source.showToolpath === "boolean" ? source.showToolpath : false,
@@ -65,7 +77,13 @@ function normalizeStaffSettings(value: unknown): StaffSettings {
 }
 
 function Field({ label, value, unit, min = 0, max, step = 1, onChange }: { label: string; value: number; unit: string; min?: number; max?: number; step?: number; onChange: (value: number) => void }) {
-  return <label className="seat-field"><span>{label}</span><span className="seat-input"><input type="number" value={value} min={min} max={max} step={step} onChange={event => { const next = event.currentTarget.valueAsNumber; if (Number.isFinite(next)) onChange(next); }} /><b>{unit}</b></span></label>;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    if (document.activeElement !== inputRef.current) setText(String(value));
+  }, [value]);
+
+  return <label className="seat-field"><span>{label}</span><span className="seat-input"><input ref={inputRef} type="number" value={text} min={min} max={max} step={step} onChange={event => { const next = event.currentTarget.value; setText(next); const parsed = Number(next); if (next !== "" && Number.isFinite(parsed)) onChange(parsed); }} onBlur={() => { if (text === "" || !Number.isFinite(Number(text))) { setText(String(value)); } }} /><b>{unit}</b></span></label>;
 }
 
 function Range({ label, value, min, max, onChange, low, high }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void; low: string; high: string }) {
@@ -231,7 +249,7 @@ export default function SeatWorkshop() {
   })), [corrected, mortises, bitDiameter, exportGeometryMode, mortisesWithinBoard]);
   const outlineInsideBoard = corrected.length > 2 && corrected.every(point => point.x >= 0 && point.x <= boardWidth && point.y >= 0 && point.y <= boardHeight);
   const outlineSafe = corrected.length > 2 && !polygonSelfIntersects(corrected) && !polygonSelfIntersects(outside);
-  const cuttingSettingsValid = Number.isFinite(stepDown) && stepDown > 0 && stepDown <= 3.2 + 1e-6
+  const cuttingSettingsValid = Number.isFinite(stepDown) && stepDown > 0 && stepDown <= 6.4 + 1e-6
     && Number.isFinite(mortiseDepth) && mortiseDepth > 0 && mortiseDepth <= boardThickness + 1e-6
     && Number.isFinite(safeZ) && safeZ > 0
     && Number.isFinite(tabWidth) && tabWidth > 0
@@ -340,6 +358,8 @@ export default function SeatWorkshop() {
   };
   const exportGcode = () => { if (!ready) return; const code = generateSeatGcode(corrected, exportedMortises, { boardWidth, boardHeight, boardThickness, mortiseDepth, bitDiameter, stepDown, stepover: .42, feedRate, plungeRate, rapidFeed: 2400, safeZ, spindleRpm, tabs, tabWidth, tabHeight }, fileName || "seat-workshop", { includeOutline: includeOutlineInExport }); const base = (fileName || "seat-workshop").replace(/\.[^.]+$/, "").replace(/[^\w\-\u3040-\u30ff\u3400-\u9fff]+/g, "_"); const suffix = exportGeometryMode === "outline-only" ? "_輪郭のみ" : exportGeometryMode === "mortises-only" ? "_ほぞ穴のみ" : ""; downloadText(code, `${base}${suffix}_加工データ.gcode`); };
   const exportDxf = () => { if (!ready) return; const code = generateSeatDxf(corrected, exportedMortises, bitDiameter, mortiseLayout, { includeOutline: includeOutlineInExport }); const base = (fileName || "seat-workshop").replace(/\.[^.]+$/, "").replace(/[^\w\-\u3040-\u30ff\u3400-\u9fff]+/g, "_"); const suffix = exportGeometryMode === "outline-only" ? "_輪郭のみ" : exportGeometryMode === "mortises-only" ? "_ほぞ穴のみ" : ""; downloadText(code, `${base}${suffix}_図面.dxf`); };
+  const exportModeLabel = exportModes.find(mode => mode.value === exportGeometryMode)?.label ?? "輪郭＋ほぞ穴";
+  const cycleExportMode = () => setExportGeometryMode(current => exportModes[(exportModes.findIndex(mode => mode.value === current) + 1) % exportModes.length].value);
 
   const seatCanvas = <div className="board-stage"><svg className={`seat-canvas ${calibrating ? "is-calibrating" : ""} ${tabEditing ? "is-tab-editing" : ""} ${outlineBox && !calibrating && !tabEditing ? "has-transform-box" : ""} ${transforming ? "is-transforming" : ""}`} viewBox={`0 0 ${boardWidth} ${boardHeight}`} style={{ aspectRatio: `${boardWidth} / ${boardHeight}` }} onClick={handlePreviewClick} onPointerMove={updateTransform} onPointerUp={endTransform} onPointerCancel={endTransform}>
     <rect x="1.5" y="1.5" width={boardWidth - 3} height={boardHeight - 3} rx="5" fill="#f4d7a1" stroke="#d6a45d" strokeWidth="3" />
@@ -351,7 +371,7 @@ export default function SeatWorkshop() {
     {outlineBox && !calibrating && !tabEditing && <g className="outline-transform"><rect className="transform-hit-area" x={outlineBox.x} y={outlineBox.y} width={outlineBox.width} height={outlineBox.height} onPointerDown={startMove} /><rect className="transform-frame" x={outlineBox.x} y={outlineBox.y} width={outlineBox.width} height={outlineBox.height} />{([['nw', outlineBox.x, outlineBox.y], ['ne', outlineBox.x + outlineBox.width, outlineBox.y], ['se', outlineBox.x + outlineBox.width, outlineBox.y + outlineBox.height], ['sw', outlineBox.x, outlineBox.y + outlineBox.height]] as const).map(([corner, x, y]) => <circle key={corner} className="transform-handle" cx={x} cy={y} r="7" onPointerDown={event => startScale(event, corner)} />)}</g>}
   </svg>{calibrating && <div className="calibration-hint"><Crosshair /><b>{pendingCorners.length + 1}/4</b> {['左上', '右上', '右下', '左下'][pendingCorners.length]}をクリック</div>}{tabEditing && <div className="tab-edit-panel"><span>輪郭をクリックして追加・丸をドラッグして移動・丸をクリックして削除</span><div><button type="button" disabled={!tabs.length} onClick={() => setTabs([])}>すべて削除</button><button type="button" onClick={() => setTabEditing(false)}>完了</button></div></div>}</div>;
 
-  return <main className={`workshop-app step-${step}`}><Decorations /><input ref={fileRef} className="visually-hidden" type="file" accept="image/*" onChange={event => loadFile(event.target.files?.[0])} />
+  return <main className={`workshop-app step-${step}`}><Decorations /><button type="button" className="export-mode-cycle" onClick={cycleExportMode} aria-label={`書き出し内容を変更。現在は${exportModeLabel}`}><small>書き出し</small><b>{exportModeLabel}</b><ChevronRight /></button><input ref={fileRef} className="visually-hidden" type="file" accept="image/*" onChange={event => loadFile(event.target.files?.[0])} />
     <header className="workshop-header"><h1><NextImage src={chairAsset("workshop-logo.png")} width={1774} height={887} priority alt="みんなでイスをつくろう" /></h1><button className="staff-button" onClick={() => setStaffOpen(true)}><Settings2 />スタッフ設定</button><StepProgress step={step} enabled={corrected.length > 2} onStep={setStep} /></header>
 
     {step === 1 && <section className="step-page photo-step"><div className="page-heading"><i /><h2>デザインの写真をよみこもう</h2><i /></div><div className="photo-layout"><button className={`big-photo-button ${imageUrl ? "has-photo" : ""}`} onClick={() => fileRef.current?.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); loadFile(event.dataTransfer.files[0]); }}>{imageUrl ? <><svg className="photo-preview-svg" role="img" aria-label="よみこんだデザイン"><image href={imageUrl} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" /></svg><span className="change-photo"><ImagePlus />写真をかえる</span></> : <><NextImage className="upload-chair" src="/chairs/image8.png" width={1193} height={1318} alt="" /><strong><Upload />写真をえらぶ</strong></>}</button></div>{imageUrl && <div className={`scan-status ${confidence}`}>{processing ? <NextImage className="chair-loader" src="/chairs/image7.png" width={1153} height={1364} alt="" /> : corrected.length ? <Check /> : <AlertTriangle />}<span>{processing ? "写真から形をさがしています…" : extractMessage}</span></div>}<div className="page-actions single"><button className="big-primary" disabled={!corrected.length || processing} onClick={() => setStep(2)}>つぎへ<ChevronRight /></button></div></section>}
@@ -366,14 +386,13 @@ export default function SeatWorkshop() {
         <header><div><small>STAFF ONLY</small><h2><Settings2 />スタッフ設定</h2></div><button aria-label="閉じる" onClick={() => setStaffOpen(false)}><X /></button></header>
         <section><h3><SlidersHorizontal />写真の読み取り</h3><Range label="線の抽出しきい値" value={threshold} min={55} max={225} onChange={setThreshold} low="濃い線だけ" high="薄い線も" /><Range label="線の切れ目補正" value={gapClosing} min={0} max={100} onChange={setGapClosing} low="小さい切れ目" high="大きい切れ目" /><Range label="写真の濃さ" value={imageOpacity} min={0} max={80} onChange={setImageOpacity} low="薄く" high="濃く" /><button className="staff-outline-button" disabled={!imageUrl} onClick={() => { setStaffOpen(false); setStep(2); setCalibrating(true); setPendingCorners([]); }}><Focus />用紙の四隅を指定</button></section>
         <section><h3><Ruler />材料とほぞ穴</h3><div className="field-grid">
-          <div className="mortise-layout-field"><span>書き出し内容</span><div role="group" aria-label="書き出し内容"><button type="button" className={exportGeometryMode === "seat-with-mortises" ? "is-active" : ""} aria-pressed={exportGeometryMode === "seat-with-mortises"} onClick={() => setExportGeometryMode("seat-with-mortises")}>輪郭＋ほぞ穴</button><button type="button" className={exportGeometryMode === "outline-only" ? "is-active" : ""} aria-pressed={exportGeometryMode === "outline-only"} onClick={() => setExportGeometryMode("outline-only")}>輪郭のみ</button><button type="button" className={exportGeometryMode === "mortises-only" ? "is-active" : ""} aria-pressed={exportGeometryMode === "mortises-only"} onClick={() => setExportGeometryMode("mortises-only")}>ほぞ穴のみ</button></div></div>
           <Field label="材料の幅" value={boardWidth} unit="mm" min={100} onChange={setBoardWidth} />
           <Field label="材料の奥行き" value={boardHeight} unit="mm" min={100} onChange={setBoardHeight} />
           <Field label="板厚" value={boardThickness} unit="mm" min={3} step={.5} onChange={value => { setBoardThickness(value); setMortiseDepth(current => Math.min(current, value)); setTabHeight(current => Math.min(current, value)); }} />
           {exportGeometryMode !== "outline-only" && <><div className="mortise-layout-field"><span>ほぞ穴の形状</span><div role="group" aria-label="ほぞ穴の形状"><button type="button" className={mortiseLayout === "four" ? "is-active" : ""} aria-pressed={mortiseLayout === "four"} onClick={() => setMortiseLayout("four")}>4つのほぞ穴</button><button type="button" className={mortiseLayout === "cross" ? "is-active" : ""} aria-pressed={mortiseLayout === "cross"} onClick={() => setMortiseLayout("cross")}>十字の形状</button></div></div><Field label="穴の幅" value={mortiseWidth} unit="mm" min={bitDiameter} onChange={setMortiseWidth} /><Field label="穴の長さ" value={mortiseHeight} unit="mm" min={bitDiameter} onChange={setMortiseHeight} /><Field label={mortiseLayout === "cross" ? "十字の横：中央の長さ" : "左右の穴：内側の間隔"} value={mortiseGapX} unit="mm" min={0} max={Math.max(0, boardWidth - mortiseHeight * 2)} onChange={value => setMortiseGapX(Math.max(0, Math.min(value, boardWidth - mortiseHeight * 2)))} /><Field label={mortiseLayout === "cross" ? "十字の縦：中央の長さ" : "上下の穴：内側の間隔"} value={mortiseGapY} unit="mm" min={0} max={Math.max(0, boardHeight - mortiseHeight * 2)} onChange={value => setMortiseGapY(Math.max(0, Math.min(value, boardHeight - mortiseHeight * 2)))} /><Field label="ポケット深さ" value={mortiseDepth} unit="mm" min={.5} max={boardThickness} step={.5} onChange={value => setMortiseDepth(Math.max(.5, Math.min(value, boardThickness)))} /></>}
         </div></section>
         <section><h3><Settings2 />切削条件</h3>
-          <div className="field-grid"><Field label="ビット径" value={bitDiameter} unit="mm" min={1} step={.1} onChange={setBitDiameter} /><Field label="1回の切削深さ" value={stepDown} unit="mm" min={.1} max={3.2} step={.1} onChange={value => setStepDown(Math.max(.1, Math.min(3.2, value)))} /><Field label="XY送り速度" value={feedRate} unit="mm/min" min={50} onChange={setFeedRate} /><Field label="Z送り速度" value={plungeRate} unit="mm/min" min={20} onChange={setPlungeRate} /><Field label="パス間退避高さ" value={safeZ} unit="mm" min={.1} step={.5} onChange={value => setSafeZ(Math.max(.1, value))} /><Field label="回転数の目安" value={spindleRpm} unit="rpm" min={1000} step={500} onChange={setSpindleRpm} /><Field label="タブの幅" value={tabWidth} unit="mm" min={1} step={1} onChange={value => setTabWidth(Math.max(1, value))} /><Field label="タブの高さ" value={tabHeight} unit="mm" min={.5} max={boardThickness} step={.5} onChange={value => setTabHeight(Math.max(.5, Math.min(value, boardThickness)))} /></div>
+          <div className="field-grid"><Field label="ビット径" value={bitDiameter} unit="mm" min={1} step={.1} onChange={setBitDiameter} /><Field label="1回の切削深さ" value={stepDown} unit="mm" min={.1} max={6.4} step={.1} onChange={value => setStepDown(Math.max(.1, Math.min(6.4, value)))} /><Field label="XY送り速度" value={feedRate} unit="mm/min" min={50} onChange={setFeedRate} /><Field label="Z送り速度" value={plungeRate} unit="mm/min" min={20} onChange={setPlungeRate} /><Field label="パス間退避高さ" value={safeZ} unit="mm" min={.1} step={.5} onChange={value => setSafeZ(Math.max(.1, value))} /><Field label="回転数の目安" value={spindleRpm} unit="rpm" min={1000} step={500} onChange={setSpindleRpm} /><Field label="タブの幅" value={tabWidth} unit="mm" min={1} step={1} onChange={value => setTabWidth(Math.max(1, value))} /><Field label="タブの高さ" value={tabHeight} unit="mm" min={.5} max={boardThickness} step={.5} onChange={value => setTabHeight(Math.max(.5, Math.min(value, boardThickness)))} /></div>
           {includeOutlineInExport && <button className="staff-outline-button" disabled={corrected.length < 3} onClick={() => { setStaffOpen(false); setStep(2); setTabEditing(true); setCalibrating(false); }}>{tabs.length ? `タブ位置を編集（${tabs.length}か所）` : "タブ位置を編集"}</button>}
           <p className="staff-note">パス間退避の初期値はZ2.000 mmです。設定値を変更しても、XY移動とZ切込みは必ず分離します。</p>
           <p className="staff-note">ドッグボーンはビット径に合わせて最小限で自動追加されます。</p>

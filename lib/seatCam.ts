@@ -464,7 +464,7 @@ export function splitClosedPathAtTabs(points: SeatPoint[], tabs: number[], tabWi
 }
 
 const fmt = (value: number) => (Math.abs(value) < .0005 ? 0 : value).toFixed(3);
-function depths(finalDepth: number, stepDown: number) { const step = Math.min(3.2, Math.max(.1, stepDown)); return Array.from({length: Math.ceil(finalDepth / step)}, (_, index) => Math.min(finalDepth, (index + 1) * step)); }
+function depths(finalDepth: number, stepDown: number) { const step = Math.min(6.4, Math.max(.1, stepDown)); return Array.from({length: Math.ceil(finalDepth / step)}, (_, index) => Math.min(finalDepth, (index + 1) * step)); }
 function emitPath(lines: string[], points: SeatPoint[], depth: number, settings: SeatJobSettings, retractFirst: boolean) {
   if (points.length < 2) return false;
   if (retractFirst) lines.push(`G0 Z${fmt(settings.safeZ)}`);
@@ -536,7 +536,7 @@ export function generateSeatGcode(outline: SeatPoint[], mortises: Mortise[], set
   if (includeOutline && outline.length < 3) throw new Error("座面の輪郭を先に読み込んでください。");
   if (!includeOutline && !mortises.length) throw new Error("書き出す加工形状がありません。");
   if (includeOutline && polygonSelfIntersects(outline)) throw new Error("座面輪郭に交差があります。なめらかさを調整してください。");
-  if (settings.stepDown > 3.2) throw new Error("一回の切削深さは3.2 mm以下にしてください。");
+  if (settings.stepDown > 6.4) throw new Error("一回の切削深さは6.4 mm以下にしてください。");
   if (!Number.isFinite(settings.safeZ) || settings.safeZ <= 0) throw new Error("退避高さは0 mmより大きくしてください。");
   const tabs = (settings.tabs ?? []).filter(position => Number.isFinite(position));
   const tabWidth = Math.max(0, settings.tabWidth ?? 0);
