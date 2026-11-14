@@ -3,7 +3,7 @@
 import NextImageBase, { type ImageProps } from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, Crosshair, Download, Focus, ImagePlus, Ruler, Settings2, ShieldCheck, SlidersHorizontal, Upload, X } from "lucide-react";
-import { buildMortises, closedPathLength, generateSeatDxf, generateSeatGcode, mortiseLayoutOutlines, mortisePocketPath, offsetPolygon, perspectiveCorrect, pointInPolygon, pointOnClosedPath, polygonSelfIntersects, type MortiseLayout, type SeatPoint } from "@/lib/seatCam";
+import { buildMortises, closedPathLength, generateSeatDxf, generateSeatGcode, mortiseLayoutOutlines, mortisePocketPaths, offsetPolygon, perspectiveCorrect, pointInPolygon, pointOnClosedPath, polygonSelfIntersects, type MortiseLayout, type SeatPoint } from "@/lib/seatCam";
 import { extractSeatOutlineWithOpenCV } from "@/lib/opencvContours";
 import { workshopText, type WorkshopLanguage } from "@/lib/workshopI18n";
 
@@ -275,8 +275,13 @@ export default function SeatWorkshop() {
   })), [corrected, mortises, bitDiameter, exportGeometryMode, mortisesWithinBoard]);
   const outlineInsideBoard = corrected.length > 2 && corrected.every(point => point.x >= 0 && point.x <= boardWidth && point.y >= 0 && point.y <= boardHeight);
   const outlineSafe = corrected.length > 2 && !polygonSelfIntersects(corrected) && !polygonSelfIntersects(outside);
+  const pocketPaths = mortisePocketPaths(exportedMortises, bitDiameter, .42);
+  const pocketPathsValid = exportedMortises.length === 0 || (pocketPaths.length > 0 && pocketPaths.every(path => path.length >= 2));
   const cuttingSettingsValid = Number.isFinite(stepDown) && stepDown > 0 && stepDown <= 6.4 + 1e-6
     && Number.isFinite(mortiseDepth) && mortiseDepth > 0 && mortiseDepth <= boardThickness + 1e-6
+    && Number.isFinite(bitDiameter) && bitDiameter > 0 && pocketPathsValid
+    && Number.isFinite(feedRate) && feedRate > 0
+    && Number.isFinite(plungeRate) && plungeRate > 0
     && Number.isFinite(safeZ) && safeZ > 0
     && Number.isFinite(tabWidth) && tabWidth > 0
     && Number.isFinite(tabHeight) && tabHeight > 0 && tabHeight <= boardThickness;
@@ -393,7 +398,7 @@ export default function SeatWorkshop() {
     <rect x="1.5" y="1.5" width={boardWidth - 3} height={boardHeight - 3} rx="5" fill="#f4d7a1" stroke="#d6a45d" strokeWidth="3" />
     {includeOutlineInExport && imageUrl && <image href={imageUrl} x="10" y="10" width={boardWidth - 20} height={boardHeight - 20} preserveAspectRatio="xMidYMid meet" opacity={imageOpacity / 100} />}{includeOutlineInExport && corrected.length > 2 && <polygon points={polyline(corrected, boardHeight)} className="seat-shape" />}{includeOutlineInExport && (showToolpath || tabEditing) && outside.length > 2 && <polygon points={polyline(outside, boardHeight)} className="outside-path" />}
     <g className="mortise">{exportedMortiseOutlines.map((outline, index) => <polygon key={`mortise-outline-${index}`} points={polyline(outline, boardHeight)} />)}<title>{t(mortiseLayout === "cross" ? "十字のほぞ穴" : "4つのほぞ穴")}</title></g>
-    {showToolpath && exportedMortises.map(mortise => <polyline key={`pocket-path-${mortise.id}`} points={polyline(mortisePocketPath(mortise, bitDiameter, .42), boardHeight)} className="pocket-path" />)}
+    {showToolpath && pocketPaths.map((path, index) => <polyline key={`pocket-path-${index}`} points={polyline(path, boardHeight)} className="pocket-path" />)}
     <g className={`profile-tabs ${tabEditing ? "is-editing" : ""}`}>{tabMarkers.map(marker => <g key={`tab-${marker.index}`}><line x1={marker.start.x} y1={boardHeight - marker.start.y} x2={marker.end.x} y2={boardHeight - marker.end.y} /><circle cx={marker.center.x} cy={boardHeight - marker.center.y} r="7" onPointerDown={event => startTabDrag(event, marker.index)} onClick={event => { event.stopPropagation(); if (suppressTabClickRef.current) { suppressTabClickRef.current = false; return; } if (tabEditing) setTabs(current => current.filter((_, index) => index !== marker.index)); }} /><text x={marker.center.x} y={boardHeight - marker.center.y + 3}>{marker.index + 1}</text></g>)}</g>
     {calibrating && pendingCorners.map((corner, index) => <g key={index} className="calibration-point"><circle cx={corner.x * boardWidth} cy={corner.y * boardHeight} r="7" /><text x={corner.x * boardWidth} y={corner.y * boardHeight + 3}>{index + 1}</text></g>)}
     {outlineBox && !calibrating && !tabEditing && <g className="outline-transform"><rect className="transform-hit-area" x={outlineBox.x} y={outlineBox.y} width={outlineBox.width} height={outlineBox.height} onPointerDown={startMove} /><rect className="transform-frame" x={outlineBox.x} y={outlineBox.y} width={outlineBox.width} height={outlineBox.height} />{([['nw', outlineBox.x, outlineBox.y], ['ne', outlineBox.x + outlineBox.width, outlineBox.y], ['se', outlineBox.x + outlineBox.width, outlineBox.y + outlineBox.height], ['sw', outlineBox.x, outlineBox.y + outlineBox.height]] as const).map(([corner, x, y]) => <circle key={corner} className="transform-handle" cx={x} cy={y} r="7" onPointerDown={event => startScale(event, corner)} />)}</g>}

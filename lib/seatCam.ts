@@ -369,30 +369,80 @@ export function mortiseLayoutOutlines(mortises: Mortise[], layout: MortiseLayout
     : mortises.map(mortise => mortiseDogboneOutline(mortise, bitDiameter, arcSegments));
 }
 
-export function mortisePocketPath(mortise: Mortise, bitDiameter: number, stepover: number) {
+type PocketRelief = { bottom: boolean; top: boolean };
+
+/** Center-out offset clearing, followed by one finish contour and minimal corner reliefs. */
+export function mortisePocketPath(mortise: Mortise, bitDiameter: number, stepover: number, relief: PocketRelief = { bottom: true, top: true }) {
   const radius = bitDiameter / 2;
+  if (!Number.isFinite(radius) || radius <= 0 || !Number.isFinite(stepover) || stepover <= 0) return [];
   const left = mortise.x - mortise.width / 2; const right = mortise.x + mortise.width / 2;
   const bottom = mortise.y - mortise.height / 2; const top = mortise.y + mortise.height / 2;
   const minX = left + radius; const maxX = right - radius;
   const minY = bottom + radius; const maxY = top - radius;
-  if (minX > maxX || minY > maxY) return [];
-  const step = Math.max(.2, bitDiameter * stepover);
-  const rows = Math.max(1, Math.ceil((maxY - minY) / step));
-  const points: SeatPoint[] = [];
-  for (let row = 0; row <= rows; row += 1) { const y = minY + (maxY - minY) * row / rows; points.push(...(row % 2 ? [{ x: maxX, y }, { x: minX, y }] : [{ x: minX, y }, { x: maxX, y }])); }
-  const reliefInset = radius / Math.SQRT2;
-  const bottomLeft = { x: left + reliefInset, y: bottom + reliefInset };
-  const bottomRight = { x: right - reliefInset, y: bottom + reliefInset };
-  const topRight = { x: right - reliefInset, y: top - reliefInset };
-  const topLeft = { x: left + reliefInset, y: top - reliefInset };
-  points.push(
-    { x: minX, y: minY }, bottomLeft, { x: minX, y: minY },
-    { x: maxX, y: minY }, bottomRight, { x: maxX, y: minY },
-    { x: maxX, y: maxY }, topRight, { x: maxX, y: maxY },
-    { x: minX, y: maxY }, topLeft, { x: minX, y: maxY },
-    { x: minX, y: minY },
-  );
-  return points;
+  if (![minX, maxX, minY, maxY].every(Number.isFinite) || minX > maxX + 1e-6 || minY > maxY + 1e-6) return [];
+  const centerX = (minX + maxX) / 2; const centerY = (minY + maxY) / 2;
+  const halfX = Math.max(0, (maxX - minX) / 2); const halfY = Math.max(0, (maxY - minY) / 2);
+  const radial = Math.min(halfX, halfY);
+  const longX = halfX - radial; const longY = halfY - radial;
+  const step = Math.min(bitDiameter * .5, bitDiameter * stepover);
+  const alongX = halfX >= halfY;
+  const points: SeatPoint[] = alongX
+    ? [{ x: centerX - longX, y: centerY }, { x: centerX + longX, y: centerY }]
+    : [{ x: centerX, y: centerY - longY }, { x: centerX, y: centerY + longY }];
+  const ringCount = radial > 1e-6 ? Math.ceil(radial / step) : 1;
+  for (let ring = 1; ring <= ringCount; ring += 1) {
+    const offset = radial > 1e-6 ? Math.min(radial, ring * step) : 0;
+    const x = longX + offset; const y = longY + offset;
+    const corners = [
+      { x: centerX - x, y: centerY - y }, { x: centerX + x, y: centerY - y },
+      { x: centerX + x, y: centerY + y }, { x: centerX - x, y: centerY + y },
+    ];
+    const first = alongX ? 2 : 3; // Nearest corner to the centerline end; CCW around an inner pocket.
+    points.push(corners[first]);
+    for (let cornerIndex = 1; cornerIndex <= 4; cornerIndex += 1) {
+      const index = (first + cornerIndex) % 4;
+      const corner = corners[index];
+      points.push(corner);
+      if (ring !== ringCount || (index < 2 ? !relief.bottom : !relief.top)) continue;
+      const inset = radius / Math.SQRT2;
+      const reliefCenter = {
+        x: index === 0 || index === 3 ? left + inset : right - inset,
+        y: index < 2 ? bottom + inset : top - inset,
+      };
+      points.push(reliefCenter, corner);
+    }
+  }
+  return points.filter((point, index) => index === 0 || Math.hypot(point.x - points[index - 1].x, point.y - points[index - 1].y) > 1e-6);
+}
+
+/** Split a cross into its horizontal bar and two arms, without recutting the full intersection. */
+export function mortisePocketPaths(mortises: Mortise[], bitDiameter: number, stepover: number) {
+  const horizontal = mortises.find(mortise => mortise.id === "cross-horizontal");
+  const vertical = mortises.find(mortise => mortise.id === "cross-vertical");
+  if (mortises.length !== 2 || !horizontal || !vertical) {
+    return mortises.map(mortise => mortisePocketPath(mortise, bitDiameter, stepover));
+  }
+  const radius = bitDiameter / 2;
+  if (!Number.isFinite(radius) || radius <= 0) return [];
+  // The split is valid only for a centred cross with arms wider than the cutter.
+  if (Math.abs(horizontal.x - vertical.x) > 1e-6 || Math.abs(horizontal.y - vertical.y) > 1e-6 ||
+      horizontal.width <= horizontal.height || vertical.height <= vertical.width ||
+      Math.abs(horizontal.height - vertical.width) > 1e-6 ||
+      horizontal.height < bitDiameter || vertical.width < bitDiameter) return [];
+  const centerY = horizontal.y;
+  const intersectionHalfHeight = horizontal.height / 2;
+  const verticalBottom = vertical.y - vertical.height / 2;
+  const verticalTop = vertical.y + vertical.height / 2;
+  // Overlap the already-cleared bar by one tool radius to avoid cusps at the T-junctions.
+  const lowerEnd = centerY - intersectionHalfHeight + radius;
+  const upperStart = centerY + intersectionHalfHeight - radius;
+  const bottomArm: Mortise = { ...vertical, id: "cross-bottom-arm", y: (verticalBottom + lowerEnd) / 2, height: lowerEnd - verticalBottom };
+  const topArm: Mortise = { ...vertical, id: "cross-top-arm", y: (upperStart + verticalTop) / 2, height: verticalTop - upperStart };
+  return [
+    mortisePocketPath(bottomArm, bitDiameter, stepover, { bottom: true, top: false }),
+    mortisePocketPath(horizontal, bitDiameter, stepover),
+    mortisePocketPath(topArm, bitDiameter, stepover, { bottom: false, top: true }),
+  ];
 }
 
 export function closedPathLength(points: SeatPoint[]) {
@@ -536,6 +586,16 @@ export function generateSeatGcode(outline: SeatPoint[], mortises: Mortise[], set
   if (includeOutline && outline.length < 3) throw new Error("座面の輪郭を先に読み込んでください。");
   if (!includeOutline && !mortises.length) throw new Error("書き出す加工形状がありません。");
   if (includeOutline && polygonSelfIntersects(outline)) throw new Error("座面輪郭に交差があります。なめらかさを調整してください。");
+  const positiveSettings: Array<[string, number]> = [
+    ["材料の幅", settings.boardWidth], ["材料の奥行き", settings.boardHeight],
+    ["板厚", settings.boardThickness], ["工具径", settings.bitDiameter],
+    ["1回の切削深さ", settings.stepDown], ["横送り率", settings.stepover],
+    ["切削送り", settings.feedRate], ["切込み送り", settings.plungeRate],
+    ["早送り", settings.rapidFeed],
+  ];
+  if (mortises.length) positiveSettings.push(["ほぞ穴の深さ", settings.mortiseDepth]);
+  const invalid = positiveSettings.find(([, value]) => !Number.isFinite(value) || value <= 0);
+  if (invalid) throw new Error(`${invalid[0]}は0より大きい数値にしてください。`);
   if (settings.stepDown > 6.4) throw new Error("一回の切削深さは6.4 mm以下にしてください。");
   if (!Number.isFinite(settings.safeZ) || settings.safeZ <= 0) throw new Error("退避高さは0 mmより大きくしてください。");
   const tabs = (settings.tabs ?? []).filter(position => Number.isFinite(position));
@@ -549,10 +609,15 @@ export function generateSeatGcode(outline: SeatPoint[], mortises: Mortise[], set
   if (includeOutline && polygonSelfIntersects(outside)) throw new Error("工具径補正後の外周パスに交差があります。輪郭を調整してください。");
   const order = includeOutline ? (mortises.length ? "; Order: mortise pockets, then outside profile" : "; Order: outside profile only") : "; Order: mortise pockets only";
   const lines = ["; CHAIR WORKSHOP / GORDIX", `; Job: ${jobName.replace(/[^\x20-\x7e]/g, "_")}`, `; Board: ${fmt(settings.boardWidth)} x ${fmt(settings.boardHeight)} x ${fmt(settings.boardThickness)} mm`, `; Tool: straight bit D${fmt(settings.bitDiameter)} mm`, `; Spindle reference: ${Math.round(settings.spindleRpm)} RPM`, "; XY0: material center / Z0: material top", `; Path retract: Z${fmt(settings.safeZ)} mm`, ...(includeOutline ? [`; Profile tabs: ${tabs.length} / width ${fmt(tabWidth)} / height ${fmt(tabHeight)} mm`] : []), order, "; Start the router manually and position Z above the material before cycle start.", "G21", "G90", `G0 X0.000 Y0.000 F${fmt(settings.rapidFeed)}`];
-  const pockets = mortises.map((mortise) => mortisePocketPath(mortise, settings.bitDiameter, settings.stepover).map(toMachineOrigin));
+  const pockets = mortisePocketPaths(mortises, settings.bitDiameter, settings.stepover).map(path => path.map(toMachineOrigin));
+  if ((mortises.length && !pockets.length) || pockets.some(path => path.length < 2)) throw new Error("ほぞ穴が工具径より小さいか、ポケット経路を生成できません。寸法と工具径を確認してください。");
   let cuttingStarted = false;
   const appendPath = (path: SeatPoint[], depth: number) => { if (emitPath(lines, path, depth, settings, cuttingStarted)) cuttingStarted = true; };
-  if (pockets.length) depths(settings.mortiseDepth, settings.stepDown).forEach((depth, pass) => { lines.push(`; MORTISE PASS ${pass + 1} Z-${fmt(depth)}`); pockets.forEach((path) => appendPath(path, depth)); });
+  // Finish all depth levels of one pocket before travelling to the next pocket.
+  pockets.forEach((path, pocketIndex) => depths(settings.mortiseDepth, settings.stepDown).forEach((depth, pass) => {
+    lines.push(`; MORTISE ${pocketIndex + 1} PASS ${pass + 1} Z-${fmt(depth)}`);
+    appendPath(path, depth);
+  }));
   if (includeOutline) {
     const closedOutside = [...outside, outside[0]];
     const tabFloorDepth = settings.boardThickness - tabHeight;
